@@ -106,7 +106,9 @@
                   ><select id="status-filter">
                     <option value="all">All statuses</option>
                     <option value="running">Running</option>
+                    <option value="cancelling">Cancelling</option>
                     <option value="queued">Queued</option>
+                    <option value="cancelled">Cancelled</option>
                     <option value="succeeded">Succeeded</option>
                     <option value="failed">Failed</option>
                     <option value="timed_out">Timed out</option>
@@ -172,6 +174,15 @@
                     <dd id="detail-exit"></dd>
                   </div>
                 </dl>
+                <div id="detail-actions" class="detail-actions" hidden>
+                  <button
+                    id="cancel-button"
+                    class="cancel-button"
+                    type="button"
+                  >
+                    Cancel run
+                  </button>
+                </div>
                 <div class="output-heading">
                   <h3>Ansible output</h3>
                   <span>stdout + stderr</span>

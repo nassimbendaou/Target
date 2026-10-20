@@ -454,13 +454,18 @@ tbody tr.selected {
   background: #fff0ee;
   color: #bf584d;
 }
-.status-running {
+.status-running,
+.status-cancelling {
   background: #eaf3ff;
   color: #3978c0;
 }
 .status-queued {
   background: #f4f1e8;
   color: #9b7840;
+}
+.status-cancelled {
+  background: #f0f3f7;
+  color: #617087;
 }
 .detail-panel {
   min-height: 420px;
@@ -500,6 +505,21 @@ tbody tr.selected {
   color: #43536a;
   text-align: right;
   overflow-wrap: anywhere;
+}
+.detail-actions {
+  padding: 0 20px 16px;
+}
+.cancel-button {
+  padding: 8px 12px;
+  border: 1px solid #d8a19b;
+  border-radius: 5px;
+  background: #fff;
+  color: #a6433d;
+  font-size: 11px;
+  font-weight: 700;
+}
+.cancel-button:hover:not(:disabled) {
+  background: #fff0ee;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

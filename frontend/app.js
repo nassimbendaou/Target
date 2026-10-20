@@ -8,6 +8,8 @@ const elements = {
   empty: document.querySelector("#empty-state"),
   detailEmpty: document.querySelector("#detail-empty"),
   detailContent: document.querySelector("#detail-content"),
+  detailActions: document.querySelector("#detail-actions"),
+  cancel: document.querySelector("#cancel-button"),
 };
 
 let jobs = [];
@@ -64,11 +66,13 @@ function renderDetails() {
     job.return_code === null ? "—" : String(job.return_code);
   document.querySelector("#detail-output").textContent =
     job.output || "Output will appear when the run finishes.";
+  elements.detailActions.hidden = !["queued", "running"].includes(job.status);
+  elements.cancel.disabled = false;
 }
 
 function render() {
-  const active = jobs.some(
-    (job) => job.status === "queued" || job.status === "running",
+  const active = jobs.some((job) =>
+    ["queued", "running", "cancelling"].includes(job.status),
   );
   elements.launch.disabled = active;
   elements.launch.textContent = active
@@ -81,8 +85,8 @@ function render() {
   document.querySelector("#metric-failed").textContent = jobs.filter(
     (job) => job.status === "failed" || job.status === "timed_out",
   ).length;
-  document.querySelector("#metric-active").textContent = jobs.filter(
-    (job) => job.status === "queued" || job.status === "running",
+  document.querySelector("#metric-active").textContent = jobs.filter((job) =>
+    ["queued", "running", "cancelling"].includes(job.status),
   ).length;
 
   const query = elements.search.value.trim().toLowerCase();
@@ -162,12 +166,32 @@ elements.launch.addEventListener("click", async () => {
     elements.launch.disabled = false;
   }
 });
+elements.cancel.addEventListener("click", async () => {
+  const jobId = selectedId;
+  if (!jobId) return;
+  elements.cancel.disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${jobId}/cancel`, {
+      method: "POST",
+    });
+    const result = await response.json();
+    if (!response.ok)
+      throw new Error(result.error || `Server returned ${response.status}`);
+    await loadJobs();
+    showNotice("Cancellation requested.");
+  } catch (error) {
+    showNotice(`Could not cancel job. ${error.message}`, true);
+    elements.cancel.disabled = false;
+  }
+});
 elements.refresh.addEventListener("click", loadJobs);
 elements.search.addEventListener("input", render);
 elements.filter.addEventListener("change", render);
 
 loadJobs();
 setInterval(() => {
-  if (jobs.some((job) => job.status === "queued" || job.status === "running"))
+  if (
+    jobs.some((job) => ["queued", "running", "cancelling"].includes(job.status))
+  )
     loadJobs();
 }, 2000);

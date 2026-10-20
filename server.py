@@ -16,12 +16,6 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
-STATIC = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
-}
 
 
 def now():
@@ -35,6 +29,7 @@ class TargetApp:
         self.database.parent.chmod(0o700)
         self.ansible_bin = ansible_bin
         self.lock = threading.Lock()
+        self.processes = {}
         with self.connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -48,7 +43,7 @@ class TargetApp:
             db.execute(
                 """UPDATE jobs SET status = 'failed', finished_at = ?,
                 output = output || '\nTarget stopped before this run finished.'
-                WHERE status IN ('queued', 'running')""",
+                WHERE status IN ('queued', 'running', 'cancelling')""",
                 (now(),),
             )
         self.database.chmod(0o600)
@@ -81,7 +76,7 @@ class TargetApp:
         with self.lock:
             with self.connect() as db:
                 active = db.execute(
-                    "SELECT 1 FROM jobs WHERE status IN ('queued', 'running') LIMIT 1"
+                    "SELECT 1 FROM jobs WHERE status IN ('queued', 'running', 'cancelling') LIMIT 1"
                 ).fetchone()
                 if active:
                     return None
@@ -94,12 +89,6 @@ class TargetApp:
             return self.job(job_id)
 
     def run(self, job_id):
-        with self.connect() as db:
-            db.execute(
-                "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
-                (now(), job_id),
-            )
-
         command = [
             self.ansible_bin,
             "-i",
@@ -112,37 +101,84 @@ class TargetApp:
         environment.update(
             ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"), ANSIBLE_NOCOLOR="1"
         )
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=ROOT,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                start_new_session=True,
-            )
+        with self.lock:
+            if self.job(job_id)["status"] != "queued":
+                return
             try:
-                output, _ = process.communicate(timeout=90)
-                status = "succeeded" if process.returncode == 0 else "failed"
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                output, _ = process.communicate()
-                output += "\nTarget stopped this run after 90 seconds."
-                status = "timed_out"
-            return_code = process.returncode
-        except (OSError, subprocess.SubprocessError) as error:
-            output = f"Could not start Ansible: {error}"
-            status = "failed"
-            return_code = None
+                process = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    start_new_session=True,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                with self.connect() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'failed', finished_at = ?, output = ? WHERE id = ?",
+                        (now(), f"Could not start Ansible: {error}", job_id),
+                    )
+                return
+            self.processes[job_id] = process
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
+                    (now(), job_id),
+                )
 
-        with self.connect() as db:
-            db.execute(
-                """UPDATE jobs SET status = ?, finished_at = ?, return_code = ?, output = ?
-                WHERE id = ?""",
-                (status, now(), return_code, output[-100_000:], job_id),
-            )
+        try:
+            output, _ = process.communicate(timeout=90)
+            status = "succeeded" if process.returncode == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            output, _ = process.communicate()
+            output += "\nTarget stopped this run after 90 seconds."
+            status = "timed_out"
+
+        with self.lock:
+            self.processes.pop(job_id)
+            if self.job(job_id)["status"] == "cancelling":
+                status = "cancelled"
+                output += "\nTarget cancelled this run."
+            with self.connect() as db:
+                db.execute(
+                    """UPDATE jobs SET status = ?, finished_at = ?, return_code = ?, output = ?
+                    WHERE id = ?""",
+                    (status, now(), process.returncode, output[-100_000:], job_id),
+                )
+
+    def cancel(self, job_id):
+        with self.lock:
+            job = self.job(job_id)
+            if not job:
+                return 404, None
+            if job["status"] == "queued":
+                with self.connect() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'cancelled', finished_at = ?, output = ? WHERE id = ?",
+                        (now(), "Target cancelled this run before it started.", job_id),
+                    )
+            elif job["status"] == "running":
+                process = self.processes[job_id]
+                if process.poll() is not None:
+                    return 409, job
+                with self.connect() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'cancelling' WHERE id = ?", (job_id,)
+                    )
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif job["status"] != "cancelling":
+                return 409, job
+            return 202, self.job(job_id)
 
 
 def make_handler(app):
@@ -184,9 +220,6 @@ def make_handler(app):
                     if job
                     else self.respond(404, {"error": "Job not found"})
                 )
-            if path in STATIC:
-                filename, content_type = STATIC[path]
-                return self.respond(200, (ROOT / filename).read_bytes(), content_type)
             return self.respond(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -196,18 +229,33 @@ def make_handler(app):
             if origin and origin not in {
                 f"http://127.0.0.1:{self.server.server_port}",
                 f"http://localhost:{self.server.server_port}",
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+                "http://127.0.0.1:4173",
+                "http://localhost:4173",
             }:
                 return self.respond(403, {"error": "Invalid origin"})
-            if urlsplit(self.path).path != "/api/jobs" or self.headers.get(
-                "Content-Length"
-            ) not in (None, "0"):
+            path = urlsplit(self.path).path
+            if self.headers.get("Content-Length") not in (None, "0"):
                 return self.respond(400, {"error": "Unsupported request"})
-            job = app.launch()
-            return (
-                self.respond(201, job)
-                if job
-                else self.respond(409, {"error": "A job is already running"})
-            )
+            if path == "/api/jobs":
+                job = app.launch()
+                return (
+                    self.respond(201, job)
+                    if job
+                    else self.respond(409, {"error": "A job is already running"})
+                )
+            if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+                job_id = path.removeprefix("/api/jobs/").removesuffix("/cancel")
+                if not job_id or "/" in job_id:
+                    return self.respond(400, {"error": "Unsupported request"})
+                status, job = app.cancel(job_id)
+                if status == 404:
+                    return self.respond(404, {"error": "Job not found"})
+                if status == 409:
+                    return self.respond(409, {"error": "Job is no longer running"})
+                return self.respond(202, job)
+            return self.respond(400, {"error": "Unsupported request"})
 
     return Handler
 
@@ -221,7 +269,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 8000), BaseHTTPRequestHandler)
     app = TargetApp(ROOT / ".data" / "target.sqlite3", ansible_bin)
     server.RequestHandlerClass = make_handler(app)
-    print("Target is ready at http://127.0.0.1:8000", flush=True)
+    print("Target API is ready at http://127.0.0.1:8000", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -66,10 +66,63 @@ class TargetServerTest(unittest.TestCase):
         status, _ = self.request("POST", "/api/jobs")
         self.assertEqual(status, 409)
 
+    def test_cancel_queued_job_before_start(self):
+        with self.app.connect() as db:
+            db.execute(
+                "INSERT INTO jobs (id, status, created_at) VALUES ('queued', 'queued', '2026-01-01')"
+            )
+        status, job = self.request("POST", "/api/jobs/queued/cancel")
+        self.assertEqual(status, 202)
+        self.assertEqual(job["status"], "cancelled")
+        self.app.run("queued")
+        self.assertIsNone(self.app.job("queued")["started_at"])
+        self.assertEqual(self.request("POST", "/api/jobs/queued/cancel")[0], 409)
+
+    def test_cancel_running_process_and_allow_next_run(self):
+        sleeper = Path(self.directory.name) / "sleeper"
+        sleeper.write_text("#!/bin/sh\nexec sleep 30\n")
+        sleeper.chmod(0o700)
+        self.app.ansible_bin = str(sleeper)
+        status, launched = self.request("POST", "/api/jobs")
+        self.assertEqual(status, 201)
+        for _ in range(100):
+            _, job = self.request("GET", f"/api/jobs/{launched['id']}")
+            if job["status"] == "running":
+                break
+            time.sleep(0.02)
+        self.assertEqual(job["status"], "running")
+        status, _ = self.request("POST", f"/api/jobs/{launched['id']}/cancel")
+        self.assertEqual(status, 202)
+        for _ in range(100):
+            _, job = self.request("GET", f"/api/jobs/{launched['id']}")
+            if job["status"] == "cancelled":
+                break
+            time.sleep(0.02)
+        self.assertEqual(job["status"], "cancelled")
+        self.assertIsNotNone(job["finished_at"])
+        self.assertNotEqual(job["return_code"], 0)
+        self.app.ansible_bin = shutil.which("true")
+        self.assertEqual(self.request("POST", "/api/jobs")[0], 201)
+
+    def test_cancel_rejects_unknown_job_and_cross_origin(self):
+        path = "/api/jobs/missing/cancel"
+        self.assertEqual(self.request("POST", path)[0], 404)
+        self.assertEqual(
+            self.request("POST", path, {"Origin": "https://example.com"})[0], 403
+        )
+
     def test_restart_marks_interrupted_run_failed(self):
         with self.app.connect() as db:
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'running', '2026-01-01')"
+            )
+        restarted = TargetApp(self.database, shutil.which("true"))
+        self.assertEqual(restarted.job("interrupted")["status"], "failed")
+
+    def test_restart_marks_cancelling_run_failed(self):
+        with self.app.connect() as db:
+            db.execute(
+                "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'cancelling', '2026-01-01')"
             )
         restarted = TargetApp(self.database, shutil.which("true"))
         self.assertEqual(restarted.job("interrupted")["status"], "failed")
