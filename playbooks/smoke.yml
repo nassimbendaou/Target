@@ -1,0 +1,9 @@
+---
+- name: Inspect the local control host
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tasks:
+    - name: Report the host and operating system
+      ansible.builtin.debug:
+        msg: "{{ ansible_facts['hostname'] }} is running {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
