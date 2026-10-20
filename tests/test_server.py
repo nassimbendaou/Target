@@ -1,6 +1,8 @@
 import http.client
 import json
 import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -11,13 +13,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server import TargetApp, make_handler
+from catalog import JobCatalog, TEMPLATES
 
 
 class TargetServerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.catalog = JobCatalog(shutil.which("ansible-inventory"))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.database = Path(self.directory.name) / "jobs.sqlite3"
-        self.app = TargetApp(self.database, shutil.which("true"))
+        self.app = TargetApp(self.database, shutil.which("true"), self.catalog)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -57,6 +64,99 @@ class TargetServerTest(unittest.TestCase):
                 return job
             time.sleep(0.02)
         self.fail(f"Job did not reach the expected state: {job}")
+
+    def test_catalog_exposes_real_inventory_hierarchy_and_membership(self):
+        status, catalog = self.request("GET", "/api/catalog")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            {item["group"] for item in catalog["templates"]},
+            {"Diagnostics", "Connectivity"},
+        )
+        inventory = catalog["inventories"][0]
+        self.assertIn("development", inventory["groups"]["all"]["children"])
+        self.assertEqual(inventory["groups"]["development"]["children"], ["control"])
+        self.assertEqual(inventory["groups"]["control"]["hosts"], ["localhost"])
+        self.assertEqual(inventory["groups"]["all"]["host_count"], 1)
+        self.assertEqual(inventory["groups"]["ungrouped"]["host_count"], 0)
+        host = inventory["hosts"][0]
+        self.assertEqual(host["direct_groups"], ["control"])
+        self.assertEqual(set(host["groups"]), {"all", "development", "control"})
+
+    def test_selected_template_is_persisted_as_a_snapshot(self):
+        status, launched = self.request(
+            "POST",
+            "/api/jobs",
+            {"Content-Type": "application/json"},
+            b'{"template_id":"local-connectivity"}',
+        )
+        self.assertEqual(status, 201)
+        finished = self.wait_for_job(
+            launched["id"], lambda job: job["status"] == "succeeded"
+        )
+        self.assertEqual(finished["template"]["id"], "local-connectivity")
+        self.assertEqual(finished["template"]["inventory"]["id"], "local")
+        self.assertEqual(finished["template"]["target_group"], "development")
+        self.assertEqual(finished["template"]["target_hosts"], ["localhost"])
+        with patch.dict(TEMPLATES["local-connectivity"], {"name": "Renamed template"}):
+            restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
+            self.assertEqual(
+                restarted.job(launched["id"])["template"]["name"],
+                "Local connectivity check",
+            )
+
+    def test_rejects_unapproved_templates_and_launch_overrides(self):
+        bodies = [
+            ({"template_id": "unknown"}, 404),
+            ({"template_id": "../../server.py"}, 404),
+            ({"template_id": ["local-smoke"]}, 400),
+            ({"template_id": "local-smoke", "inventory": "other.yml"}, 400),
+            ({"playbook": "other.yml"}, 400),
+            (["local-smoke"], 400),
+        ]
+        for body, expected in bodies:
+            with self.subTest(body=body):
+                status, _ = self.request(
+                    "POST",
+                    "/api/jobs",
+                    {"Content-Type": "application/json"},
+                    json.dumps(body).encode(),
+                )
+                self.assertEqual(status, expected)
+        for body in [b'{"template_id":', b"x" * 1025]:
+            self.assertEqual(
+                self.request(
+                    "POST", "/api/jobs", {"Content-Type": "application/json"}, body
+                )[0],
+                400,
+            )
+        self.assertEqual(self.app.jobs(), [])
+
+    def test_migrates_history_without_changing_legacy_results(self):
+        database = Path(self.directory.name) / "legacy.sqlite3"
+        with sqlite3.connect(database) as db:
+            db.execute(
+                "CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, return_code INTEGER, output TEXT NOT NULL DEFAULT '')"
+            )
+            db.execute(
+                "INSERT INTO jobs (id, status, created_at, return_code, output) VALUES ('old', 'succeeded', '2026-01-01', 0, 'Original output')"
+            )
+        migrated = TargetApp(database, shutil.which("true"), self.catalog).job("old")
+        self.assertEqual(migrated["status"], "succeeded")
+        self.assertEqual(migrated["output"], "Original output")
+        self.assertEqual(migrated["template"]["inventory"]["id"], "localhost-inline")
+
+    def test_approved_playbooks_run_against_their_inventory_groups(self):
+        for template_id in TEMPLATES:
+            with self.subTest(template=template_id):
+                result = subprocess.run(
+                    self.catalog.command(shutil.which("ansible-playbook"), template_id),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("localhost", result.stdout)
+                self.assertIn("changed=0", result.stdout)
 
     def test_output_is_available_before_job_finishes(self):
         release = Path(self.directory.name) / "release"
@@ -187,7 +287,7 @@ class TargetServerTest(unittest.TestCase):
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'running', '2026-01-01')"
             )
-        restarted = TargetApp(self.database, shutil.which("true"))
+        restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
         self.assertEqual(restarted.job("interrupted")["status"], "failed")
 
     def test_restart_marks_cancelling_run_failed(self):
@@ -195,7 +295,7 @@ class TargetServerTest(unittest.TestCase):
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'cancelling', '2026-01-01')"
             )
-        restarted = TargetApp(self.database, shutil.which("true"))
+        restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
         self.assertEqual(restarted.job("interrupted")["status"], "failed")
 
 

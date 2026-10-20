@@ -1,4 +1,4 @@
-"""Local Target prototype: one fixed Ansible job and its execution history."""
+"""Local Target prototype: approved Ansible workflows and execution history."""
 
 import codecs
 import json
@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from catalog import JobCatalog, LEGACY_TEMPLATE
 
 ROOT = Path(__file__).resolve().parent
 RUN_TIMEOUT_SECONDS = 90
@@ -27,8 +28,17 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def decode_job(row):
+    job = dict(row)
+    job["template"] = (
+        json.loads(job["template"]) if job["template"] else LEGACY_TEMPLATE
+    )
+    return job
+
+
 class TargetApp:
-    def __init__(self, database, ansible_bin):
+    def __init__(self, database, ansible_bin, catalog=None):
+        self.catalog = catalog or JobCatalog(shutil.which("ansible-inventory"))
         self.database = Path(database)
         self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.database.parent.chmod(0o700)
@@ -45,6 +55,13 @@ class TargetApp:
                 return_code INTEGER,
                 output TEXT NOT NULL DEFAULT ''
             )""")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "template" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN template TEXT")
+            db.execute(
+                "UPDATE jobs SET template = ? WHERE template IS NULL",
+                (json.dumps(LEGACY_TEMPLATE),),
+            )
             db.execute(
                 """UPDATE jobs SET status = 'failed', finished_at = ?,
                 output = output || '\nTarget stopped before this run finished.'
@@ -66,7 +83,7 @@ class TargetApp:
     def jobs(self):
         with self.connect() as db:
             return [
-                dict(row)
+                decode_job(row)
                 for row in db.execute(
                     "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100"
                 )
@@ -75,9 +92,10 @@ class TargetApp:
     def job(self, job_id):
         with self.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            return dict(row) if row else None
+            return decode_job(row) if row else None
 
-    def launch(self):
+    def launch(self, template_id="local-smoke"):
+        template = self.catalog.template(template_id)
         with self.lock:
             with self.connect() as db:
                 active = db.execute(
@@ -87,21 +105,13 @@ class TargetApp:
                     return None
                 job_id = str(uuid.uuid4())
                 db.execute(
-                    "INSERT INTO jobs (id, status, created_at) VALUES (?, 'queued', ?)",
-                    (job_id, now()),
+                    "INSERT INTO jobs (id, status, created_at, template) VALUES (?, 'queued', ?, ?)",
+                    (job_id, now(), json.dumps(template)),
                 )
             threading.Thread(target=self.run, args=(job_id,), daemon=True).start()
             return self.job(job_id)
 
     def run(self, job_id):
-        command = [
-            self.ansible_bin,
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            "playbooks/smoke.yml",
-        ]
         environment = os.environ.copy()
         environment.update(
             ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"),
@@ -109,8 +119,10 @@ class TargetApp:
             PYTHONUNBUFFERED="1",
         )
         with self.lock:
-            if self.job(job_id)["status"] != "queued":
+            job = self.job(job_id)
+            if job["status"] != "queued":
                 return
+            command = self.catalog.command(self.ansible_bin, job["template"]["id"])
             try:
                 process = subprocess.Popen(
                     command,
@@ -239,6 +251,8 @@ def make_handler(app):
             if not self.allowed_host():
                 return self.respond(403, {"error": "Invalid host"})
             path = urlsplit(self.path).path
+            if path == "/api/catalog":
+                return self.respond(200, app.catalog.describe())
             if path == "/api/jobs":
                 return self.respond(200, app.jobs())
             if path.startswith("/api/jobs/"):
@@ -264,16 +278,50 @@ def make_handler(app):
             }:
                 return self.respond(403, {"error": "Invalid origin"})
             path = urlsplit(self.path).path
-            if self.headers.get("Content-Length") not in (None, "0"):
+            length = self.headers.get("Content-Length", "0")
+            if (
+                self.headers.get("Transfer-Encoding")
+                or len(length) > 4
+                or not length.isascii()
+                or not length.isdigit()
+                or int(length) > 1024
+            ):
                 return self.respond(400, {"error": "Unsupported request"})
+            length = int(length)
             if path == "/api/jobs":
-                job = app.launch()
+                template_id = "local-smoke"
+                if length:
+                    if (
+                        self.headers.get("Content-Type", "").split(";")[0].strip()
+                        != "application/json"
+                    ):
+                        return self.respond(400, {"error": "Expected JSON"})
+                    try:
+                        self.connection.settimeout(5)
+                        parameters = json.loads(self.rfile.read(length))
+                    except (ValueError, UnicodeDecodeError, OSError):
+                        return self.respond(400, {"error": "Invalid JSON"})
+                    if (
+                        not isinstance(parameters, dict)
+                        or set(parameters) != {"template_id"}
+                        or not isinstance(parameters["template_id"], str)
+                    ):
+                        return self.respond(
+                            400, {"error": "Choose an approved template"}
+                        )
+                    template_id = parameters["template_id"]
+                try:
+                    job = app.launch(template_id)
+                except KeyError:
+                    return self.respond(404, {"error": "Unknown job template"})
                 return (
                     self.respond(201, job)
                     if job
                     else self.respond(409, {"error": "A job is already running"})
                 )
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+                if length:
+                    return self.respond(400, {"error": "Unsupported request"})
                 job_id = path.removeprefix("/api/jobs/").removesuffix("/cancel")
                 if not job_id or "/" in job_id:
                     return self.respond(400, {"error": "Unsupported request"})

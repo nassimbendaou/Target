@@ -20,8 +20,18 @@
           <span class="workspace-icon">L</span><span>Local development</span>
         </div>
         <nav aria-label="Primary navigation">
-          <a class="nav-item current" href="/" aria-current="page"
+          <a
+            class="nav-item current"
+            href="#jobs"
+            data-view="jobs"
+            aria-current="page"
             ><span class="nav-icon" aria-hidden="true">▤</span> Jobs</a
+          >
+          <a class="nav-item" href="#templates" data-view="templates"
+            ><span class="nav-icon" aria-hidden="true">▦</span> Templates</a
+          >
+          <a class="nav-item" href="#inventory" data-view="inventory"
+            ><span class="nav-icon" aria-hidden="true">▧</span> Inventory</a
           >
         </nav>
         <div class="sidebar-bottom">
@@ -33,31 +43,42 @@
       <main class="main-content">
         <header class="topbar">
           <span>Automation</span><span class="topbar-separator">/</span
-          ><strong>Jobs</strong
+          ><strong id="current-section">Jobs</strong
           ><span class="environment-tag">LOCAL PREVIEW</span>
         </header>
-        <div class="content">
+        <div
+          id="notice"
+          class="notice global-notice"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+        <section id="jobs-view" class="content" aria-label="Jobs">
           <div class="page-heading">
             <div>
               <p class="eyebrow">EXECUTION OVERVIEW</p>
-              <h1>Jobs</h1>
+              <h1 tabindex="-1">Jobs</h1>
               <p class="intro">
-                Run the bundled Ansible smoke check and inspect its actual
-                result.
+                Launch an approved workflow and inspect its execution evidence.
               </p>
             </div>
-            <button id="launch-button" class="primary-button" type="button">
-              <span aria-hidden="true">＋</span> Run smoke check
-            </button>
+            <div class="launch-controls">
+              <label class="launch-template"
+                ><span>Job template</span
+                ><select id="launch-template" disabled>
+                  <option>Loading templates…</option>
+                </select></label
+              >
+              <button
+                id="launch-button"
+                class="primary-button"
+                type="button"
+                disabled
+              >
+                ＋ Run template
+              </button>
+            </div>
           </div>
-
-          <div
-            id="notice"
-            class="notice"
-            role="status"
-            aria-live="polite"
-            hidden
-          ></div>
 
           <section class="metrics" aria-label="Job summary">
             <div class="metric">
@@ -100,7 +121,7 @@
                   ><input
                     id="search"
                     type="search"
-                    placeholder="Search by run ID or status" /></label
+                    placeholder="Search runs or templates" /></label
                 ><label class="status-field"
                   ><span class="sr-only">Filter by status</span
                   ><select id="status-filter">
@@ -112,6 +133,20 @@
                     <option value="succeeded">Succeeded</option>
                     <option value="failed">Failed</option>
                     <option value="timed_out">Timed out</option>
+                  </select></label
+                >
+              </div>
+              <div class="filters workflow-filters">
+                <label class="status-field"
+                  ><span class="sr-only">Filter by workflow group</span
+                  ><select id="group-filter">
+                    <option value="all">All workflow groups</option>
+                  </select></label
+                >
+                <label class="status-field"
+                  ><span class="sr-only">Filter by template</span
+                  ><select id="template-filter">
+                    <option value="all">All templates</option>
                   </select></label
                 >
               </div>
@@ -132,7 +167,7 @@
                 <div class="empty-icon" aria-hidden="true">▤</div>
                 <h3>No runs yet</h3>
                 <p>
-                  Run the localhost smoke check to see its status and Ansible
+                  Choose an approved template to see its status and Ansible
                   output here.
                 </p>
               </div>
@@ -153,10 +188,26 @@
               </div>
               <div id="detail-content" hidden>
                 <div class="detail-title">
-                  <strong>Local smoke check</strong
+                  <strong id="detail-name"></strong
                   ><span id="detail-status" class="status-pill"></span>
                 </div>
                 <dl class="detail-list">
+                  <div>
+                    <dt>Workflow group</dt>
+                    <dd id="detail-group"></dd>
+                  </div>
+                  <div>
+                    <dt>Inventory</dt>
+                    <dd id="detail-inventory"></dd>
+                  </div>
+                  <div>
+                    <dt>Target group</dt>
+                    <dd id="detail-target"></dd>
+                  </div>
+                  <div>
+                    <dt>Target hosts</dt>
+                    <dd id="detail-hosts"></dd>
+                  </div>
                   <div>
                     <dt>Run ID</dt>
                     <dd id="detail-id" class="mono"></dd>
@@ -202,10 +253,74 @@
             </section>
           </div>
           <p class="prototype-note">
-            Local prototype · fixed localhost playbook · no remote hosts or
+            Local prototype · approved localhost workflows · no remote hosts or
             credentials
           </p>
-        </div>
+        </section>
+        <section
+          id="templates-view"
+          class="content"
+          aria-label="Templates"
+          hidden
+        >
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">APPROVED WORKFLOWS</p>
+              <h1 tabindex="-1">Templates</h1>
+              <p class="intro">
+                Repeatable automation with a defined inventory and target group.
+              </p>
+            </div>
+          </div>
+          <div id="template-catalog" class="template-catalog"></div>
+          <p class="prototype-note">
+            Templates are reviewed in the repository. Both bundled workflows are
+            read-only.
+          </p>
+        </section>
+        <section
+          id="inventory-view"
+          class="content"
+          aria-label="Inventory"
+          hidden
+        >
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">EXECUTION TARGETS</p>
+              <h1 tabindex="-1">Inventory</h1>
+              <p class="intro">
+                Explore inventories, nested host groups, and their actual hosts.
+              </p>
+            </div>
+          </div>
+          <div class="dashboard-grid inventory-grid">
+            <section class="panel" aria-labelledby="inventory-heading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="inventory-heading">Local development</h2>
+                  <p id="inventory-summary">Loading inventory…</p>
+                </div>
+                <span class="environment-tag">REPO MANAGED</span>
+              </div>
+              <div id="inventory-tree" class="inventory-tree"></div>
+            </section>
+            <section class="panel" aria-labelledby="host-heading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="host-heading">Host details</h2>
+                  <p>Membership and connection</p>
+                </div>
+              </div>
+              <div id="host-details" class="host-details">
+                <p class="intro">Select a host in the inventory.</p>
+              </div>
+            </section>
+          </div>
+          <p class="prototype-note">
+            Child-group hosts also belong to their parent groups. A host may
+            belong to several groups.
+          </p>
+        </section>
       </main>
     </div>
   </body>
