@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111b2c" />
+    <title>Jobs · Target</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Workspace">
+        <a class="brand" href="/" aria-label="Target home"
+          ><span class="brand-mark">T</span><span>Target</span></a
+        >
+        <div class="workspace-label">WORKSPACE</div>
+        <div class="workspace-name">
+          <span class="workspace-icon">L</span><span>Local development</span>
+        </div>
+        <nav aria-label="Primary navigation">
+          <a
+            class="nav-item current"
+            href="#jobs"
+            data-view="jobs"
+            aria-current="page"
+            ><span class="nav-icon" aria-hidden="true">▤</span> Jobs</a
+          >
+          <a class="nav-item" href="#templates" data-view="templates"
+            ><span class="nav-icon" aria-hidden="true">▦</span> Templates</a
+          >
+          <a class="nav-item" href="#inventory" data-view="inventory"
+            ><span class="nav-icon" aria-hidden="true">▧</span> Inventory</a
+          >
+        </nav>
+        <div class="sidebar-bottom">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span>Local control plane</span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <span>Automation</span><span class="topbar-separator">/</span
+          ><strong id="current-section">Jobs</strong
+          ><span class="environment-tag">LOCAL PREVIEW</span>
+        </header>
+        <div
+          id="notice"
+          class="notice global-notice"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></div>
+        <section id="jobs-view" class="content" aria-label="Jobs">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">EXECUTION OVERVIEW</p>
+              <h1 tabindex="-1">Jobs</h1>
+              <p class="intro">
+                Launch an approved workflow and inspect its execution evidence.
+              </p>
+            </div>
+            <div class="launch-controls">
+              <label class="launch-template"
+                ><span>Job template</span
+                ><select id="launch-template" disabled>
+                  <option>Loading templates…</option>
+                </select></label
+              >
+              <button
+                id="launch-button"
+                class="primary-button"
+                type="button"
+                disabled
+              >
+                ＋ Run template
+              </button>
+            </div>
+          </div>
+
+          <section class="metrics" aria-label="Job summary">
+            <div class="metric">
+              <span class="metric-label">Runs shown</span
+              ><strong id="metric-total">—</strong
+              ><span class="metric-note">Latest 100 local runs</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Succeeded</span
+              ><strong id="metric-succeeded">—</strong
+              ><span class="metric-note">Completed without errors</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Failed</span
+              ><strong id="metric-failed">—</strong
+              ><span class="metric-note">Includes timed out runs</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">In progress</span
+              ><strong id="metric-active">—</strong
+              ><span class="metric-note">One run at a time</span>
+            </div>
+          </section>
+
+          <div class="dashboard-grid">
+            <section class="panel jobs-panel" aria-labelledby="runs-heading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="runs-heading">Recent runs</h2>
+                  <p>Latest 100 executions on this machine</p>
+                </div>
+                <button id="refresh-button" class="text-button" type="button">
+                  Refresh
+                </button>
+              </div>
+              <div class="filters">
+                <label class="search-field"
+                  ><span class="sr-only">Search jobs</span
+                  ><span aria-hidden="true">⌕</span
+                  ><input
+                    id="search"
+                    type="search"
+                    placeholder="Search runs or templates" /></label
+                ><label class="status-field"
+                  ><span class="sr-only">Filter by status</span
+                  ><select id="status-filter">
+                    <option value="all">All statuses</option>
+                    <option value="running">Running</option>
+                    <option value="cancelling">Cancelling</option>
+                    <option value="queued">Queued</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="succeeded">Succeeded</option>
+                    <option value="failed">Failed</option>
+                    <option value="timed_out">Timed out</option>
+                  </select></label
+                >
+              </div>
+              <div class="filters workflow-filters">
+                <label class="status-field"
+                  ><span class="sr-only">Filter by workflow group</span
+                  ><select id="group-filter">
+                    <option value="all">All workflow groups</option>
+                  </select></label
+                >
+                <label class="status-field"
+                  ><span class="sr-only">Filter by template</span
+                  ><select id="template-filter">
+                    <option value="all">All templates</option>
+                  </select></label
+                >
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Run</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Started</th>
+                      <th scope="col">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody id="jobs-body"></tbody>
+                </table>
+              </div>
+              <div id="empty-state" class="empty-state" hidden>
+                <div class="empty-icon" aria-hidden="true">▤</div>
+                <h3>No runs yet</h3>
+                <p>
+                  Choose an approved template to see its status and Ansible
+                  output here.
+                </p>
+              </div>
+            </section>
+
+            <section
+              class="panel detail-panel"
+              aria-labelledby="detail-heading"
+            >
+              <div class="panel-heading">
+                <div>
+                  <h2 id="detail-heading">Run details</h2>
+                  <p>Execution evidence</p>
+                </div>
+              </div>
+              <div id="detail-empty" class="detail-empty">
+                Select a run to inspect its output.
+              </div>
+              <div id="detail-content" hidden>
+                <div class="detail-title">
+                  <strong id="detail-name"></strong
+                  ><span id="detail-status" class="status-pill"></span>
+                </div>
+                <dl class="detail-list">
+                  <div>
+                    <dt>Workflow group</dt>
+                    <dd id="detail-group"></dd>
+                  </div>
+                  <div>
+                    <dt>Inventory</dt>
+                    <dd id="detail-inventory"></dd>
+                  </div>
+                  <div>
+                    <dt>Target group</dt>
+                    <dd id="detail-target"></dd>
+                  </div>
+                  <div>
+                    <dt>Target hosts</dt>
+                    <dd id="detail-hosts"></dd>
+                  </div>
+                  <div>
+                    <dt>Run ID</dt>
+                    <dd id="detail-id" class="mono"></dd>
+                  </div>
+                  <div>
+                    <dt>Created</dt>
+                    <dd id="detail-created"></dd>
+                  </div>
+                  <div>
+                    <dt>Finished</dt>
+                    <dd id="detail-finished"></dd>
+                  </div>
+                  <div>
+                    <dt>Exit code</dt>
+                    <dd id="detail-exit"></dd>
+                  </div>
+                </dl>
+                <div id="detail-actions" class="detail-actions" hidden>
+                  <button
+                    id="cancel-button"
+                    class="cancel-button"
+                    type="button"
+                  >
+                    Cancel run
+                  </button>
+                </div>
+                <div class="output-heading">
+                  <h3 id="output-heading">Ansible output</h3>
+                  <span id="output-state">stdout + stderr</span>
+                </div>
+                <pre
+                  id="detail-output"
+                  class="output"
+                  tabindex="0"
+                  aria-labelledby="output-heading"
+                  aria-describedby="output-retention"
+                ></pre>
+                <p id="output-retention" class="output-note">
+                  Showing the latest 100,000 characters. Scroll up to pause
+                  following new output.
+                </p>
+              </div>
+            </section>
+          </div>
+          <p class="prototype-note">
+            Local prototype · approved localhost workflows · no remote hosts or
+            credentials
+          </p>
+        </section>
+        <section
+          id="templates-view"
+          class="content"
+          aria-label="Templates"
+          hidden
+        >
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">APPROVED WORKFLOWS</p>
+              <h1 tabindex="-1">Templates</h1>
+              <p class="intro">
+                Repeatable automation with a defined inventory and target group.
+              </p>
+            </div>
+          </div>
+          <div id="template-catalog" class="template-catalog"></div>
+          <p class="prototype-note">
+            Templates are reviewed in the repository. Both bundled workflows are
+            read-only.
+          </p>
+        </section>
+        <section
+          id="inventory-view"
+          class="content"
+          aria-label="Inventory"
+          hidden
+        >
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">EXECUTION TARGETS</p>
+              <h1 tabindex="-1">Inventory</h1>
+              <p class="intro">
+                Explore inventories, nested host groups, and their actual hosts.
+              </p>
+            </div>
+          </div>
+          <div class="dashboard-grid inventory-grid">
+            <section class="panel" aria-labelledby="inventory-heading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="inventory-heading">Local development</h2>
+                  <p id="inventory-summary">Loading inventory…</p>
+                </div>
+                <span class="environment-tag">REPO MANAGED</span>
+              </div>
+              <div id="inventory-tree" class="inventory-tree"></div>
+            </section>
+            <section class="panel" aria-labelledby="host-heading">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="host-heading">Host details</h2>
+                  <p>Membership and connection</p>
+                </div>
+              </div>
+              <div id="host-details" class="host-details">
+                <p class="intro">Select a host in the inventory.</p>
+              </div>
+            </section>
+          </div>
+          <p class="prototype-note">
+            Child-group hosts also belong to their parent groups. A host may
+            belong to several groups.
+          </p>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

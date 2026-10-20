@@ -1,6 +1,6 @@
 ---
 - name: Inspect the local control host
-  hosts: localhost
+  hosts: all
   connection: local
   gather_facts: true
   tasks:

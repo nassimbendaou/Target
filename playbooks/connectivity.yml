@@ -1,0 +1,7 @@
+---
+- name: Verify local Ansible connectivity
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verify Python module execution
+      ansible.builtin.ping:
