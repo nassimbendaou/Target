@@ -184,10 +184,20 @@
                   </button>
                 </div>
                 <div class="output-heading">
-                  <h3>Ansible output</h3>
-                  <span>stdout + stderr</span>
+                  <h3 id="output-heading">Ansible output</h3>
+                  <span id="output-state">stdout + stderr</span>
                 </div>
-                <pre id="detail-output" class="output"></pre>
+                <pre
+                  id="detail-output"
+                  class="output"
+                  tabindex="0"
+                  aria-labelledby="output-heading"
+                  aria-describedby="output-retention"
+                ></pre>
+                <p id="output-retention" class="output-note">
+                  Showing the latest 100,000 characters. Scroll up to pause
+                  following new output.
+                </p>
               </div>
             </section>
           </div>

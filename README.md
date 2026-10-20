@@ -13,7 +13,7 @@ nix develop --command python server.py
 nix develop --command npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Choose **Run smoke check** and inspect its status and Ansible output. You can cancel a queued or running job from its details panel. To run the checks:
+Open <http://127.0.0.1:5173>. Choose **Run smoke check** and inspect its status and live Ansible output. The dashboard refreshes active runs every two seconds and retains the latest 100,000 output characters, including output produced before cancellation or timeout. Output follows the latest lines while you are at the bottom; scroll up to read earlier lines. You can cancel a queued or running job from its details panel. To run the checks:
 
 ```sh
 nix develop --command python -m unittest discover -s tests -v

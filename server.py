@@ -1,12 +1,15 @@
 """Local Target prototype: one fixed Ansible job and its execution history."""
 
+import codecs
 import json
 import os
+import selectors
 import shutil
 import signal
 import sqlite3
 import subprocess
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -16,6 +19,8 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
+RUN_TIMEOUT_SECONDS = 90
+OUTPUT_LIMIT = 100_000
 
 
 def now():
@@ -99,7 +104,9 @@ class TargetApp:
         ]
         environment = os.environ.copy()
         environment.update(
-            ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"), ANSIBLE_NOCOLOR="1"
+            ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"),
+            ANSIBLE_NOCOLOR="1",
+            PYTHONUNBUFFERED="1",
         )
         with self.lock:
             if self.job(job_id)["status"] != "queued":
@@ -111,8 +118,6 @@ class TargetApp:
                     env=environment,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    errors="replace",
                     start_new_session=True,
                 )
             except (OSError, subprocess.SubprocessError) as error:
@@ -129,16 +134,39 @@ class TargetApp:
                     (now(), job_id),
                 )
 
-        try:
-            output, _ = process.communicate(timeout=90)
-            status = "succeeded" if process.returncode == 0 else "failed"
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            output, _ = process.communicate()
-            output += "\nTarget stopped this run after 90 seconds."
+        output = ""
+        persisted_output = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+        next_flush = 0
+        timed_out = False
+        with process.stdout, selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map() or process.poll() is None:
+                if not timed_out and time.monotonic() >= deadline:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    timed_out = True
+                for key, _ in selector.select(timeout=0.25):
+                    chunk = os.read(key.fd, 8192)
+                    if chunk:
+                        output = (output + decoder.decode(chunk))[-OUTPUT_LIMIT:]
+                    else:
+                        selector.unregister(key.fileobj)
+                if output != persisted_output and time.monotonic() >= next_flush:
+                    with self.connect() as db:
+                        db.execute(
+                            "UPDATE jobs SET output = ? WHERE id = ?", (output, job_id)
+                        )
+                    persisted_output = output
+                    next_flush = time.monotonic() + 0.25
+        process.wait()
+        output = (output + decoder.decode(b"", final=True))[-OUTPUT_LIMIT:]
+        status = "succeeded" if process.returncode == 0 else "failed"
+        if timed_out:
+            output += f"\nTarget stopped this run after {RUN_TIMEOUT_SECONDS} seconds."
             status = "timed_out"
 
         with self.lock:
@@ -150,7 +178,7 @@ class TargetApp:
                 db.execute(
                     """UPDATE jobs SET status = ?, finished_at = ?, return_code = ?, output = ?
                     WHERE id = ?""",
-                    (status, now(), process.returncode, output[-100_000:], job_id),
+                    (status, now(), process.returncode, output[-OUTPUT_LIMIT:], job_id),
                 )
 
     def cancel(self, job_id):

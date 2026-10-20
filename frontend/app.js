@@ -10,10 +10,13 @@ const elements = {
   detailContent: document.querySelector("#detail-content"),
   detailActions: document.querySelector("#detail-actions"),
   cancel: document.querySelector("#cancel-button"),
+  output: document.querySelector("#detail-output"),
+  outputState: document.querySelector("#output-state"),
 };
 
 let jobs = [];
 let selectedId = null;
+let displayedId = null;
 
 function date(value) {
   return value
@@ -64,8 +67,25 @@ function renderDetails() {
   );
   document.querySelector("#detail-exit").textContent =
     job.return_code === null ? "—" : String(job.return_code);
-  document.querySelector("#detail-output").textContent =
-    job.output || "Output will appear when the run finishes.";
+  const active = ["queued", "running", "cancelling"].includes(job.status);
+  elements.outputState.textContent = active
+    ? "Live · updates every 2s"
+    : "stdout + stderr";
+  const followOutput =
+    displayedId !== job.id ||
+    elements.output.scrollTop + elements.output.clientHeight >=
+      elements.output.scrollHeight - 8;
+  const scrollTop = elements.output.scrollTop;
+  const output =
+    job.output ||
+    (active ? "Waiting for Ansible output…" : "No output recorded.");
+  if (elements.output.textContent !== output) {
+    elements.output.textContent = output;
+  }
+  elements.output.scrollTop = followOutput
+    ? elements.output.scrollHeight
+    : scrollTop;
+  displayedId = job.id;
   elements.detailActions.hidden = !["queued", "running"].includes(job.status);
   elements.cancel.disabled = false;
 }
