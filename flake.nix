@@ -10,7 +10,11 @@
     in {
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.python313 pkgs.ansible pkgs.nodejs_24 pkgs.prettier pkgs.ruff pkgs.actionlint ];
+          packages = [
+            (pkgs.python313.withPackages (ps: [ ps.authlib ps.requests ]))
+            pkgs.ansible pkgs.nodejs_24 pkgs.prettier pkgs.ruff pkgs.actionlint
+            pkgs.keycloak
+          ];
         };
       });
     };

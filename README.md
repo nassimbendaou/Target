@@ -4,6 +4,14 @@ Target is an early local prototype for running and inspecting Ansible jobs. It r
 
 ## Run it
 
+Start local Keycloak in its own terminal:
+
+```sh
+nix develop --command python -m dev.keycloak
+```
+
+This provisions a `target` realm on `http://127.0.0.1:8180`, with `viewer`, `operator`, and `admin` development users. Random credentials are stored privately in `.data/keycloak/accounts.json`; they are never committed or printed. The separate `bootstrap-admin` account is only for Keycloak administration. Restarting preserves credentials and existing realm data. This is a local development setup, not a production identity deployment. The client uses authorization code flow with S256 PKCE and one exact callback URL; password and implicit grants and public registration are disabled. See [Keycloak realm imports](https://www.keycloak.org/server/importExport).
+
 From the Nix shell, install the locked frontend dependencies once, then run the API and Vite in separate terminals:
 
 ```sh
