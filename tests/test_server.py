@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.api import make_handler
+from backend.auth import AuthManager, ISSUER, SESSION_COOKIE
 from backend.jobs import TargetApp
 from backend.catalog import JobCatalog, TEMPLATES, ROOT
 
@@ -29,7 +30,19 @@ class TargetServerTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.database = Path(self.directory.name) / "backend.jobs.sqlite3"
         self.app = TargetApp(self.database, shutil.which("true"), self.catalog)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
+        self.auth = AuthManager(self.app.store)
+        self.session_id, self.csrf = self.auth.create_session(
+            {
+                "sub": "test-admin",
+                "issuer": ISSUER,
+                "name": "Test admin",
+                "roles": ["admin"],
+            },
+            time.time() + 300,
+        )
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.app, self.auth)
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -46,8 +59,14 @@ class TargetServerTest(unittest.TestCase):
 
     def request(self, method, path, headers=None, body=b""):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        supplied = {
+            "Cookie": f"{SESSION_COOKIE}={self.session_id}",
+            "X-CSRF-Token": self.csrf,
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            **(headers or {}),
+        }
         connection.request(
-            method, path, body=body if method == "POST" else None, headers=headers or {}
+            method, path, body=body if method == "POST" else None, headers=supplied
         )
         response = connection.getresponse()
         result = response.status, json.loads(response.read())

@@ -24,6 +24,36 @@ let selectedId = null;
 let displayedId = null;
 let catalog = null;
 let launchPending = false;
+let session = null;
+
+function updateSession(value) {
+  session = value;
+  document.querySelector("#signin-panel").hidden = Boolean(session);
+  document.querySelector("#logout-button").hidden = !session;
+  document.querySelector("#session-user").textContent = session
+    ? `${session.user.name} · ${session.user.roles.join(", ")}`
+    : "Signed out";
+  if (!session) {
+    jobs = [];
+    catalog = null;
+    selectedId = null;
+  }
+  showView();
+  render();
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { "X-CSRF-Token": session?.csrf || "", ...options.headers },
+    cache: "no-store",
+  });
+  if (response.status === 401) {
+    updateSession(null);
+    throw new Error("Session expired. Sign in again.");
+  }
+  return response;
+}
 
 function showView(focus = false) {
   const name = location.hash.slice(1);
@@ -32,7 +62,7 @@ function showView(focus = false) {
     : "jobs";
   const label = view[0].toUpperCase() + view.slice(1);
   for (const section of document.querySelectorAll("main > section"))
-    section.hidden = section.id !== `${view}-view`;
+    section.hidden = !session || section.id !== `${view}-view`;
   for (const link of document.querySelectorAll("[data-view]")) {
     const current = link.dataset.view === view;
     link.classList.toggle("current", current);
@@ -41,7 +71,7 @@ function showView(focus = false) {
   }
   document.querySelector("#current-section").textContent = label;
   document.title = `${label} · Target`;
-  if (focus) document.querySelector(`#${view}-view h1`).focus();
+  if (focus && session) document.querySelector(`#${view}-view h1`).focus();
 }
 
 function addOption(select, value, label) {
@@ -207,7 +237,8 @@ function renderDetails() {
     ? elements.output.scrollHeight
     : scrollTop;
   displayedId = job.id;
-  elements.detailActions.hidden = !["queued", "running"].includes(job.status);
+  elements.detailActions.hidden =
+    !session?.can_operate || !["queued", "running"].includes(job.status);
   elements.cancel.disabled = false;
 }
 
@@ -215,7 +246,8 @@ function render() {
   const active = jobs.some((job) =>
     ["queued", "running", "cancelling"].includes(job.status),
   );
-  elements.launch.disabled = active || launchPending || !catalog;
+  elements.launch.disabled =
+    active || launchPending || !catalog || !session?.can_operate;
   elements.launchTemplate.disabled = elements.launch.disabled;
   for (const button of document.querySelectorAll("[data-template-run]"))
     button.disabled = elements.launch.disabled;
@@ -294,7 +326,7 @@ function render() {
 
 async function loadJobs() {
   try {
-    const response = await fetch("/api/jobs", { cache: "no-store" });
+    const response = await api("/api/jobs");
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
     jobs = await response.json();
     for (const template of [
@@ -321,7 +353,7 @@ async function launch(templateId) {
   location.hash = "jobs";
   render();
   try {
-    const response = await fetch("/api/jobs", {
+    const response = await api("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ template_id: templateId }),
@@ -346,7 +378,7 @@ elements.cancel.addEventListener("click", async () => {
   if (!jobId) return;
   elements.cancel.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${jobId}/cancel`, {
+    const response = await api(`/api/jobs/${jobId}/cancel`, {
       method: "POST",
     });
     const result = await response.json();
@@ -369,7 +401,14 @@ elements.templateFilter.addEventListener("change", render);
 
 async function initialize() {
   try {
-    const response = await fetch("/api/catalog", { cache: "no-store" });
+    const identity = await fetch("/api/auth/session", { cache: "no-store" });
+    if (identity.status === 401) {
+      updateSession(null);
+      return;
+    }
+    if (!identity.ok) throw new Error(`Server returned ${identity.status}`);
+    updateSession(await identity.json());
+    const response = await api("/api/catalog");
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
     catalog = await response.json();
     renderCatalog();
@@ -381,6 +420,16 @@ async function initialize() {
     );
   }
 }
+
+document.querySelector("#logout-button").addEventListener("click", async () => {
+  try {
+    const response = await api("/api/auth/logout", { method: "POST" });
+    if (!response.ok) throw new Error("Could not sign out");
+    location.reload();
+  } catch (error) {
+    showNotice(error.message, true);
+  }
+});
 
 showView();
 window.addEventListener("hashchange", () => showView(true));

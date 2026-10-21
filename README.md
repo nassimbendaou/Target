@@ -21,7 +21,7 @@ nix develop --command python server.py
 nix develop --command npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Choose a job template and select **Run template**, or launch it from **Templates**. Filter history by workflow group, template, or status. Each run records its template definition, inventory name, target group, and resolved host names; later template renames do not rewrite history. Existing runs retain their original inline localhost inventory label.
+Open <http://127.0.0.1:5173> and sign in with Keycloak. Use that exact origin: the local client does not register wildcard callbacks, `localhost`, or the preview port. Viewers can inspect history and inventory; operators and administrators can also launch and cancel runs. Choose a job template and select **Run template**, or launch it from **Templates**. Filter history by workflow group, template, or status. Each run records its template definition, inventory name, target group, and resolved host names; later template renames do not rewrite history. Existing runs retain their original inline localhost inventory label.
 
 The dashboard refreshes active runs every two seconds and retains the latest 100,000 output characters, including output produced before cancellation or timeout. Output follows the latest lines while you are at the bottom; scroll up to read earlier lines. You can cancel a queued or running job from its details panel. To run the checks:
 
@@ -42,6 +42,7 @@ server.py               Root launcher
 backend/
 ├── server.py           Entry point and server lifetime
 ├── api.py              HTTP routes, validation, and response headers
+├── auth.py             Keycloak login, server-side sessions, role policy
 ├── jobs.py             Job lifecycle, snapshots, execution, cancellation
 ├── storage.py          SQLite schema, recovery, connections, and history
 ├── environment.py      Allowlisted child-process environment
@@ -69,6 +70,20 @@ The run inspector's **Run timeline** shows persisted lifecycle events in recorde
 Completed older runs retain an empty timeline rather than reconstructed events. Rejected launch/cancel requests do not create lifecycle events. This is a local operational history, not a security audit trail: events have no authenticated actor, signing, or protection against database edits. No event write/delete API is exposed.
 
 ## Scope and safety
+
+### Local authentication and roles
+
+The API requires authentication for catalog and job reads and writes; there is no development bypass. Roles come only from verified Keycloak ID tokens, never request headers or launch parameters. Authlib handles authorization-code/PKCE operations and OIDC claim validation, with joserfc verifying RS256 signatures. Issuer, audience, expiry, and nonce are checked. Login state is bound to an HttpOnly browser cookie, expires after five minutes, and is consumed once. Callback query strings are omitted from API request logs.
+
+The browser receives an opaque HttpOnly, SameSite=Lax cookie, not identity-provider tokens. Session identifiers are hashed in SQLite; sessions expire within five minutes or at the ID token's expiry, whichever comes first. Mutating requests also require an allowed Origin and the session's CSRF token. Signing out of Target revokes its local session but does not terminate Keycloak SSO. Role changes and account revocation take effect at the next sign-in or session expiry, not immediately. The current admin role has the same job permissions as operator; user administration remains in Keycloak.
+
+This is **localhost development only**: cookies are not Secure because the local URLs use HTTP. Keycloak has local caching, no cluster discovery, and a loopback-only HTTP listener. Other applications on the same machine are not isolated by these cookies. HTTPS, Secure cookies, provider logout/revocation integration, and deployment configuration are required before shared or production use.
+
+The regular suite validates cryptography and the API without a live identity provider. To additionally test real Keycloak login for all three generated users, start Keycloak and run:
+
+```sh
+TARGET_TEST_KEYCLOAK=1 nix develop --command python -m unittest discover -s tests -p test_keycloak_live.py -v
+```
 
 ### Templates and inventory
 
@@ -103,4 +118,4 @@ This is not a sandbox: approved playbooks still run as the API's operating-syste
 
 Both servers listen on `127.0.0.1` only. The API checks the host and browser origin, allows one job at a time across all templates, limits a run to 90 seconds, and records the result. Cancelling sends SIGKILL to the local job's process group and records it as cancelled. The UI shows no simulated hosts or jobs.
 
-This is a development slice, not a production automation service. There is no login, approval record, customer worker, container isolation, remote inventory, or secrets integration yet. Do not expose the local API through a reverse proxy or run it on a shared machine. Those boundaries are the next feature before any remote execution.
+This is a development slice, not a production automation service. There is no approval record, customer worker, container isolation, remote inventory, or secrets integration yet. Do not expose the local API through a reverse proxy or run it on a shared machine. Those boundaries are required before any remote execution.

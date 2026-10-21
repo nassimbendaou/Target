@@ -14,6 +14,7 @@ class ServerStartupTest(unittest.TestCase):
                 "backend.server.shutil.which", return_value="/trusted/ansible-playbook"
             ),
             patch("backend.server.TargetApp") as application,
+            patch("backend.server.AuthManager"),
             patch("backend.server.ThreadingHTTPServer") as http_server,
             patch("builtins.print"),
         ):

@@ -1,13 +1,31 @@
 """Local HTTP routes and request/response safety checks."""
 
 import json
+import hmac
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
+from authlib.common.errors import AuthlibBaseError
+from joserfc.errors import JoseError
+from requests import RequestException
 
-def make_handler(app):
+from .auth import FLOW_COOKIE, ORIGIN, can_operate, cookie
+
+
+def make_handler(app, auth):
     class Handler(BaseHTTPRequestHandler):
-        def respond(self, status, body, content_type="application/json; charset=utf-8"):
+        def log_request(self, code="-", size="-"):
+            self.log_message(
+                '"%s %s" %s %s', self.command, urlsplit(self.path).path, code, size
+            )
+
+        def respond(
+            self,
+            status,
+            body,
+            content_type="application/json; charset=utf-8",
+            headers=(),
+        ):
             data = (
                 json.dumps(body).encode()
                 if content_type.startswith("application/json")
@@ -18,6 +36,9 @@ def make_handler(app):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            for name, value in headers:
+                self.send_header(name, value)
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
@@ -35,6 +56,42 @@ def make_handler(app):
             if not self.allowed_host():
                 return self.respond(403, {"error": "Invalid host"})
             path = urlsplit(self.path).path
+            if path in {"/api/auth/login", "/api/auth/callback"}:
+                try:
+                    if path == "/api/auth/login":
+                        location, login_cookie = auth.begin_login()
+                        headers = [("Location", location), ("Set-Cookie", login_cookie)]
+                    else:
+                        session_cookie = auth.complete_login(
+                            urlsplit(self.path).query, self.headers.get("Cookie")
+                        )
+                        headers = [
+                            ("Location", ORIGIN),
+                            ("Set-Cookie", session_cookie),
+                            ("Set-Cookie", cookie(FLOW_COOKIE, "", 0)),
+                        ]
+                    return self.respond(302, {}, headers=headers)
+                except (
+                    ValueError,
+                    AuthlibBaseError,
+                    JoseError,
+                    RequestException,
+                    KeyError,
+                    TypeError,
+                ):
+                    return self.respond(
+                        401,
+                        {
+                            "error": "Sign-in failed. Check local Keycloak and try again."
+                        },
+                    )
+            session = auth.session(self.headers.get("Cookie"))
+            if not session:
+                return self.respond(401, {"error": "Sign in with Keycloak"})
+            if path == "/api/auth/session":
+                return self.respond(
+                    200, {**session, "can_operate": can_operate(session)}
+                )
             if path == "/api/catalog":
                 return self.respond(200, app.catalog.describe())
             if path == "/api/jobs":
@@ -52,7 +109,7 @@ def make_handler(app):
             if not self.allowed_host():
                 return self.respond(403, {"error": "Invalid host"})
             origin = self.headers.get("Origin")
-            if origin and origin not in {
+            if origin not in {
                 f"http://127.0.0.1:{self.server.server_port}",
                 f"http://localhost:{self.server.server_port}",
                 "http://127.0.0.1:5173",
@@ -72,6 +129,23 @@ def make_handler(app):
             ):
                 return self.respond(400, {"error": "Unsupported request"})
             length = int(length)
+            session = auth.session(self.headers.get("Cookie"))
+            if not session:
+                return self.respond(401, {"error": "Sign in with Keycloak"})
+            if not hmac.compare_digest(
+                self.headers.get("X-CSRF-Token", "").encode(), session["csrf"].encode()
+            ):
+                return self.respond(403, {"error": "Invalid CSRF token"})
+            if path == "/api/auth/logout":
+                if length:
+                    return self.respond(400, {"error": "Unsupported request"})
+                return self.respond(
+                    200,
+                    {"signed_out": True},
+                    headers=[("Set-Cookie", auth.logout(self.headers.get("Cookie")))],
+                )
+            if not can_operate(session):
+                return self.respond(403, {"error": "Operator role required"})
             if path == "/api/jobs":
                 template_id = "local-smoke"
                 if length:
