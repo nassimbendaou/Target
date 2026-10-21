@@ -1,15 +1,16 @@
 """Approved local workflows and the inventory resolved by Ansible."""
 
 import json
-import os
 import subprocess
 import tempfile
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 
+from .environment import execution_environment
 
-ROOT = Path(__file__).resolve().parent
+
+ROOT = Path(__file__).resolve().parent.parent
 INVENTORY_SOURCE = ROOT / "inventories" / "local.yml"
 TEMPLATES = {
     "local-smoke": {
@@ -37,31 +38,6 @@ LEGACY_TEMPLATE = {
     "target_group": "all",
     "target_hosts": ["localhost"],
 }
-
-
-def execution_environment(directory):
-    """Keep ambient credentials and Ansible overrides out of child processes."""
-    directory = Path(directory)
-    runner_home = directory / "home"
-    runner_temp = directory / "tmp"
-    for path in (runner_home, runner_temp):
-        path.mkdir(mode=0o700)
-    # shortcut: PATH is the trusted local toolchain; pin worker images before remote execution.
-    return {
-        **{
-            name: os.environ[name]
-            for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
-            if name in os.environ
-        },
-        "HOME": str(runner_home),
-        "TMPDIR": str(runner_temp),
-        "ANSIBLE_HOME": str(runner_home / ".ansible"),
-        "ANSIBLE_LOCAL_TEMP": str(runner_temp / "ansible"),
-        "ANSIBLE_REMOTE_TEMP": str(runner_temp / "modules"),
-        "ANSIBLE_CONFIG": str(directory / "ansible.cfg"),
-        "ANSIBLE_NOCOLOR": "1",
-        "PYTHONUNBUFFERED": "1",
-    }
 
 
 class JobCatalog:
