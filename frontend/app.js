@@ -137,6 +137,17 @@ function renderDetails() {
   if (!job) return;
 
   document.querySelector("#detail-name").textContent = job.template.name;
+  const hashes = job.template.source_hashes;
+  document.querySelector("#input-legacy").hidden = Boolean(hashes);
+  document.querySelector("#input-provenance").hidden = !hashes;
+  document.querySelector("#detail-revision").textContent =
+    job.template.revision || "";
+  for (const [name, id] of [
+    ["playbook.yml", "detail-playbook-hash"],
+    ["inventory.yml", "detail-inventory-hash"],
+    ["ansible.cfg", "detail-config-hash"],
+  ])
+    document.getElementById(id).textContent = hashes?.[name] || "";
   document.querySelector("#detail-group").textContent = job.template.group;
   document.querySelector("#detail-inventory").textContent =
     job.template.inventory.name;

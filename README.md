@@ -56,6 +56,14 @@ The **Inventory** view uses `ansible-inventory --list` to resolve this hierarchy
 
 Inventory and template definitions are managed in the repository, not edited in the browser. Restart the API after changing them. This version accepts only localhost with a local connection. The launch API accepts an approved `template_id`, never a playbook path, inventory path, host pattern, or command. An empty launch request remains compatible with the original smoke-check API.
 
+### Execution input snapshots
+
+At startup, Target captures the bundled playbooks, inventory, and Ansible configuration. Ansible resolves the captured inventory, so the hierarchy shown in the dashboard describes the same inventory used for execution. Repository edits take effect only after restarting the API.
+
+Each launch stores its captured files privately in SQLite alongside the template definition. The worker verifies their SHA-256 hashes and the input revision before executing copies in a temporary working directory. A missing or inconsistent snapshot fails the run without falling back to live repository files. Temporary files are removed after execution, including cancellation and timeout. The run inspector's **Execution inputs** section shows the revision and individual file hashes; source contents are not returned as API metadata. Older runs show that snapshots were not captured.
+
+This covers the bundled self-contained playbooks, not external roles, includes, variable files, secrets, or the host's state. Hashes identify inputs and detect accidental inconsistency; they are not signed audit records or execution isolation. Keep the SQLite database private.
+
 Both servers listen on `127.0.0.1` only. The API checks the host and browser origin, allows one job at a time across all templates, limits a run to 90 seconds, and records the result. Cancelling sends SIGKILL to the local job's process group and records it as cancelled. The UI shows no simulated hosts or jobs.
 
 This is a development slice, not a production automation service. There is no login, approval record, customer worker, container isolation, remote inventory, or secrets integration yet. Do not expose the local API through a reverse proxy or run it on a shared machine. Those boundaries are the next feature before any remote execution.

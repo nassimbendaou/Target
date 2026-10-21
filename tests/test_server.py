@@ -2,18 +2,18 @@ import http.client
 import json
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from http.server import ThreadingHTTPServer
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
 from server import TargetApp, make_handler
-from catalog import JobCatalog, TEMPLATES
+from catalog import JobCatalog, TEMPLATES, ROOT
 
 
 class TargetServerTest(unittest.TestCase):
@@ -65,6 +65,101 @@ class TargetServerTest(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"Job did not reach the expected state: {job}")
 
+    def queue_without_running(self):
+        with patch.object(self.app, "run"):
+            return self.app.launch()
+
+    def test_run_uses_frozen_files_after_repository_and_catalog_change(self):
+        repository = Path(self.directory.name) / "repository"
+        for name in [
+            "inventories/local.yml",
+            "ansible.cfg",
+            "playbooks/smoke.yml",
+            "playbooks/connectivity.yml",
+        ]:
+            destination = repository / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, destination)
+        with (
+            patch("catalog.ROOT", repository),
+            patch("catalog.INVENTORY_SOURCE", repository / "inventories/local.yml"),
+        ):
+            catalog = JobCatalog(shutil.which("ansible-inventory"))
+        originals = catalog.execution_files("local-smoke")
+        self.app.catalog = catalog
+        for name in ["inventories/local.yml", "ansible.cfg", "playbooks/smoke.yml"]:
+            (repository / name).write_text("changed before launch")
+        self.program(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "print(json.dumps({'files': {'inventory.yml': Path(sys.argv[2]).read_text(), 'playbook.yml': Path(sys.argv[-1]).read_text(), 'ansible.cfg': Path(os.environ['ANSIBLE_CONFIG']).read_text()}, 'directory': str(Path.cwd()), 'limit': sys.argv[sys.argv.index('--limit') + 1]}))"
+        )
+        launched = self.queue_without_running()
+        self.app.catalog = self.catalog
+        with patch.dict(
+            self.catalog._templates["local-smoke"],
+            {"target_group": "changed-after-queue"},
+        ):
+            self.app.run(launched["id"])
+        finished = self.app.job(launched["id"])
+        self.assertEqual(finished["status"], "succeeded", finished["output"])
+        captured = json.loads(finished["output"])
+        self.assertEqual(captured["files"], originals)
+        self.assertEqual(captured["limit"], "control")
+        self.assertFalse(Path(captured["directory"]).exists())
+        self.assertEqual(
+            finished["template"]["revision"], launched["template"]["revision"]
+        )
+        for name, content in originals.items():
+            self.assertEqual(
+                finished["template"]["source_hashes"][name],
+                sha256(content.encode()).hexdigest(),
+            )
+
+    def test_changed_files_or_target_fail_closed_before_process_start(self):
+        for change in ["files", "target"]:
+            with self.subTest(change=change):
+                launched = self.queue_without_running()
+                with self.app.connect() as db:
+                    if change == "files":
+                        files = self.catalog.execution_files("local-smoke")
+                        files["playbook.yml"] = "altered playbook"
+                        db.execute(
+                            "UPDATE job_inputs SET files = ? WHERE job_id = ?",
+                            (json.dumps(files), launched["id"]),
+                        )
+                    else:
+                        template = launched["template"]
+                        template["target_group"] = "altered"
+                        db.execute(
+                            "UPDATE jobs SET template = ? WHERE id = ?",
+                            (json.dumps(template), launched["id"]),
+                        )
+                with patch("server.subprocess.Popen") as process:
+                    self.app.run(launched["id"])
+                    process.assert_not_called()
+                job = self.app.job(launched["id"])
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("integrity verification", job["output"])
+
+    def test_missing_execution_snapshot_does_not_fall_back_to_repository(self):
+        launched = self.queue_without_running()
+        with self.app.connect() as db:
+            db.execute("DELETE FROM job_inputs WHERE job_id = ?", (launched["id"],))
+        with patch("server.subprocess.Popen") as process:
+            self.app.run(launched["id"])
+            process.assert_not_called()
+        self.assertEqual(self.app.job(launched["id"])["status"], "failed")
+
+    def test_source_contents_are_not_returned_as_job_metadata(self):
+        launched = self.queue_without_running()
+        status, job = self.request("GET", f"/api/jobs/{launched['id']}")
+        self.assertEqual(status, 200)
+        self.assertNotIn("files", job)
+        self.assertNotIn("ansible_python_interpreter", json.dumps(job))
+        self.assertEqual(len(job["template"]["revision"]), 64)
+        self.app.cancel(launched["id"])
+
     def test_catalog_exposes_real_inventory_hierarchy_and_membership(self):
         status, catalog = self.request("GET", "/api/catalog")
         self.assertEqual(status, 200)
@@ -97,7 +192,9 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(finished["template"]["inventory"]["id"], "local")
         self.assertEqual(finished["template"]["target_group"], "development")
         self.assertEqual(finished["template"]["target_hosts"], ["localhost"])
-        with patch.dict(TEMPLATES["local-connectivity"], {"name": "Renamed template"}):
+        with patch.dict(
+            self.catalog._templates["local-connectivity"], {"name": "Renamed template"}
+        ):
             restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
             self.assertEqual(
                 restarted.job(launched["id"])["template"]["name"],
@@ -144,19 +241,19 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(migrated["status"], "succeeded")
         self.assertEqual(migrated["output"], "Original output")
         self.assertEqual(migrated["template"]["inventory"]["id"], "localhost-inline")
+        self.assertNotIn("revision", migrated["template"])
 
     def test_approved_playbooks_run_against_their_inventory_groups(self):
+        self.app.ansible_bin = shutil.which("ansible-playbook")
         for template_id in TEMPLATES:
             with self.subTest(template=template_id):
-                result = subprocess.run(
-                    self.catalog.command(shutil.which("ansible-playbook"), template_id),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
+                launched = self.app.launch(template_id)
+                finished = self.wait_for_job(
+                    launched["id"], lambda job: job["finished_at"] is not None
                 )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("localhost", result.stdout)
-                self.assertIn("changed=0", result.stdout)
+                self.assertEqual(finished["status"], "succeeded", finished["output"])
+                self.assertIn("localhost", finished["output"])
+                self.assertIn("changed=0", finished["output"])
 
     def test_output_is_available_before_job_finishes(self):
         release = Path(self.directory.name) / "release"

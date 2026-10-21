@@ -622,6 +622,21 @@ tbody tr.selected {
 .detail-actions {
   padding: 0 20px 16px;
 }
+.input-details {
+  margin: 0 20px 18px;
+  border: 1px solid #e0e6ed;
+  border-radius: 5px;
+}
+.input-details summary {
+  padding: 12px;
+  cursor: pointer;
+  color: #43536a;
+  font-size: 11px;
+  font-weight: 650;
+}
+.input-details .detail-list {
+  padding: 0 12px 12px;
+}
 .cancel-button {
   padding: 8px 12px;
   border: 1px solid #d8a19b;

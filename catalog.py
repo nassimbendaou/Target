@@ -3,6 +3,9 @@
 import json
 import os
 import subprocess
+import tempfile
+from copy import deepcopy
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -42,15 +45,33 @@ class JobCatalog:
             raise ValueError(
                 "ansible-inventory is required; start Target with nix develop"
             )
-        result = subprocess.run(
-            [inventory_bin, "-i", str(INVENTORY_SOURCE), "--list"],
-            cwd=ROOT,
-            env={**os.environ, "ANSIBLE_CONFIG": str(ROOT / "ansible.cfg")},
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=True,
-        )
+        self._templates = deepcopy(TEMPLATES)
+        inventory = INVENTORY_SOURCE.read_bytes().decode("utf-8")
+        config = (ROOT / "ansible.cfg").read_bytes().decode("utf-8")
+        # shortcut: snapshot self-contained playbooks only; bundle roles, vars, and includes before accepting external projects.
+        self._files = {
+            template_id: {
+                "inventory.yml": inventory,
+                "ansible.cfg": config,
+                "playbook.yml": (ROOT / template["playbook"])
+                .read_bytes()
+                .decode("utf-8"),
+            }
+            for template_id, template in self._templates.items()
+        }
+        with tempfile.TemporaryDirectory(prefix="target-catalog-") as directory:
+            directory = Path(directory)
+            (directory / "inventory.yml").write_bytes(inventory.encode("utf-8"))
+            (directory / "ansible.cfg").write_bytes(config.encode("utf-8"))
+            result = subprocess.run(
+                [inventory_bin, "-i", str(directory / "inventory.yml"), "--list"],
+                cwd=directory,
+                env={**os.environ, "ANSIBLE_CONFIG": str(directory / "ansible.cfg")},
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=True,
+            )
         data = json.loads(result.stdout)
         hostvars = data.get("_meta", {}).get("hostvars", {})
         if (
@@ -95,7 +116,7 @@ class JobCatalog:
                 if "localhost" in self.group_hosts(name)
             ],
         )
-        for template in TEMPLATES.values():
+        for template in self._templates.values():
             if self.group_hosts(template["target_group"]) != ["localhost"]:
                 raise ValueError("Every approved template must target the local host")
 
@@ -112,29 +133,29 @@ class JobCatalog:
         return sorted(hosts)
 
     def template(self, template_id):
-        definition = TEMPLATES[template_id]
-        return {
+        definition = self._templates[template_id]
+        template = {
             "id": template_id,
             **definition,
             "inventory": {"id": self.inventory["id"], "name": self.inventory["name"]},
             "target_hosts": self.group_hosts(definition["target_group"]),
+            "source_hashes": {
+                name: sha256(content.encode("utf-8")).hexdigest()
+                for name, content in self._files[template_id].items()
+            },
         }
+        template["revision"] = sha256(
+            json.dumps(template, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return template
 
     def describe(self):
         return {
-            "templates": [self.template(template_id) for template_id in TEMPLATES],
+            "templates": [
+                self.template(template_id) for template_id in self._templates
+            ],
             "inventories": [self.inventory],
         }
 
-    def command(self, ansible_bin, template_id):
-        template = TEMPLATES[template_id]
-        return [
-            ansible_bin,
-            "-i",
-            str(INVENTORY_SOURCE),
-            "-c",
-            "local",
-            "--limit",
-            template["target_group"],
-            template["playbook"],
-        ]
+    def execution_files(self, template_id):
+        return self._files[template_id].copy()
