@@ -25,6 +25,18 @@ nix develop --command npm run build
 
 The Nix flake pins Python, Ansible, Node, and Prettier. `package-lock.json` pins Vite and its dependencies. Frontend source lives in `frontend/`; Vite proxies `/api` to the Python server on port 8000 and restricts file serving to that directory. The API does not serve the frontend. Job history is saved in `.data/target.sqlite3` and is ignored by Git.
 
+## Pull request checks
+
+GitHub Actions runs the same locked Nix shell on pushes to `master` and `feat/**`, and on pull requests targeting `master`. Checks cover Python linting and formatting, workflow validation, frontend formatting, API tests, both real localhost playbooks, and the Vite build. The integration tests use temporary databases and leave your job history unchanged.
+
+To check a workflow change locally:
+
+```sh
+nix develop --command actionlint
+```
+
+The workflow uses actions pinned to commit SHAs and a read-only repository token. Dependency installation uses `npm ci --ignore-scripts`; the frontend build uses the packages pinned in `package-lock.json`.
+
 ## Scope and safety
 
 ### Templates and inventory

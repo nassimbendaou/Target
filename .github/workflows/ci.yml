@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Nix checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: nix develop --no-update-lock-file --command bash -euo pipefail {0}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012 # v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          enable_kvm: false
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts
+      - name: Lint Python
+        run: |
+          ruff check catalog.py server.py tests
+          ruff format --check catalog.py server.py tests
+      - name: Check workflow and frontend formatting
+        run: |
+          actionlint
+          prettier --check frontend/*.js frontend/*.html frontend/*.css inventories/*.yml playbooks/*.yml package.json package-lock.json vite.config.js README.md .github/workflows/*.yml
+      - name: Test API and real localhost playbooks
+        run: python -m unittest discover -s tests -v
+      - name: Build Vite frontend
+        run: npm run build
