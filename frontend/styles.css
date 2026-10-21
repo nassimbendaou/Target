@@ -637,6 +637,21 @@ tbody tr.selected {
 .input-details .detail-list {
   padding: 0 12px 12px;
 }
+.run-timeline {
+  margin: 0;
+  padding: 0 12px 12px 30px;
+  color: #43536a;
+  font-size: 11px;
+}
+.run-timeline li {
+  padding: 6px 0;
+}
+.run-timeline time {
+  display: block;
+  margin-top: 4px;
+  color: #63758a;
+  font-size: 10px;
+}
 .cancel-button {
   padding: 8px 12px;
   border: 1px solid #d8a19b;

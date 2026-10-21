@@ -25,6 +25,23 @@ nix develop --command npm run build
 
 The Nix flake pins Python, Ansible, Node, and Prettier. `package-lock.json` pins Vite and its dependencies. Frontend source lives in `frontend/`; Vite proxies `/api` to the Python server on port 8000 and restricts file serving to that directory. The API does not serve the frontend. Job history is saved in `.data/target.sqlite3` and is ignored by Git.
 
+## Backend layout
+
+The backend remains one process, with no new dependencies or network interfaces:
+
+```text
+server.py               Root launcher
+backend/
+├── server.py           Entry point and server lifetime
+├── api.py              HTTP routes, validation, and response headers
+├── jobs.py             Job lifecycle, snapshots, execution, cancellation
+├── storage.py          SQLite schema, recovery, connections, and history
+├── environment.py      Allowlisted child-process environment
+└── catalog.py          Approved templates and resolved inventory
+```
+
+`TargetApp` coordinates execution using `JobStore`. Job-state changes and lifecycle events still share one transaction; process start, cancellation, and completion still share one lock. The HTTP interface, database location, history format, and `python server.py` command are unchanged. You can also start it with `python -m backend.server`. Ruff checks the entire repository so new Python modules are covered automatically.
+
 ## Pull request checks
 
 GitHub Actions runs the same locked Nix shell on pushes to `master` and `feat/**`, and on pull requests targeting `master`. Checks cover Python linting and formatting, workflow validation, frontend formatting, API tests, both real localhost playbooks, and the Vite build. The integration tests use temporary databases and leave your job history unchanged.
@@ -37,11 +54,17 @@ nix develop --command actionlint
 
 The workflow uses actions pinned to commit SHAs and a read-only repository token. Dependency installation uses `npm ci --ignore-scripts`; the frontend build uses the packages pinned in `package-lock.json`.
 
+## Run timeline
+
+The run inspector's **Run timeline** shows persisted lifecycle events in recorded order: queued, execution started, cancellation requested, and the final outcome. Snapshot preparation and process startup failures are recorded even when execution never starts. On API startup, unfinished runs are marked failed with an interruption-detected event; that timestamp is when Target detected the interruption, not when the process stopped. Events are committed in the same SQLite transaction as their job-state changes. API list and detail responses include the same ordered `events` array.
+
+Completed older runs retain an empty timeline rather than reconstructed events. Rejected launch/cancel requests do not create lifecycle events. This is a local operational history, not a security audit trail: events have no authenticated actor, signing, or protection against database edits. No event write/delete API is exposed.
+
 ## Scope and safety
 
 ### Templates and inventory
 
-The approved catalog is defined in `catalog.py`. It contains a **Diagnostics** smoke check targeting `control`, and a **Connectivity** check targeting its parent group `development`. `inventories/local.yml` is the real inventory used by both playbooks:
+The approved catalog is defined in `backend/catalog.py`. It contains a **Diagnostics** smoke check targeting `control`, and a **Connectivity** check targeting its parent group `development`. `inventories/local.yml` is the real inventory used by both playbooks:
 
 ```text
 Local development

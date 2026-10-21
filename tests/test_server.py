@@ -9,13 +9,15 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from http.server import ThreadingHTTPServer
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
-from server import TargetApp, make_handler
-from catalog import JobCatalog, TEMPLATES, ROOT
+from backend.api import make_handler
+from backend.jobs import TargetApp
+from backend.catalog import JobCatalog, TEMPLATES, ROOT
 
 
 class TargetServerTest(unittest.TestCase):
@@ -25,7 +27,7 @@ class TargetServerTest(unittest.TestCase):
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.database = Path(self.directory.name) / "jobs.sqlite3"
+        self.database = Path(self.directory.name) / "backend.jobs.sqlite3"
         self.app = TargetApp(self.database, shutil.which("true"), self.catalog)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -71,6 +73,107 @@ class TargetServerTest(unittest.TestCase):
         with patch.object(self.app, "run"):
             return self.app.launch()
 
+    def assert_events(self, job, expected):
+        self.assertEqual([event["event"] for event in job["events"]], expected)
+        ids = [event["id"] for event in job["events"]]
+        self.assertEqual(ids, sorted(set(ids)))
+        for event in job["events"]:
+            self.assertEqual(set(event), {"id", "event", "occurred_at"})
+            self.assertTrue(event["occurred_at"].endswith("+00:00"))
+
+    def test_events_persist_and_match_list_and_detail_without_crossing_jobs(self):
+        first = self.queue_without_running()
+        self.assert_events(first, ["queued"])
+        self.app.run(first["id"])
+        second = self.queue_without_running()
+        self.app.cancel(second["id"])
+        self.assertEqual(self.app.cancel(second["id"])[0], 409)
+        _, detail = self.request("GET", f"/api/jobs/{first['id']}")
+        self.assert_events(detail, ["queued", "started", "succeeded"])
+        _, jobs = self.request("GET", "/api/jobs")
+        listed = {job["id"]: job for job in jobs}
+        self.assertEqual(listed[first["id"]], detail)
+        self.assert_events(listed[second["id"]], ["queued", "cancelled"])
+        self.assertTrue(
+            {event["id"] for event in detail["events"]}.isdisjoint(
+                event["id"] for event in listed[second["id"]]["events"]
+            )
+        )
+        restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
+        self.assertEqual(restarted.job(first["id"]), detail)
+
+    def test_event_insert_failure_rolls_back_the_launch_and_snapshot(self):
+        with patch(
+            "backend.jobs.record_event",
+            side_effect=sqlite3.OperationalError("disk full"),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.app.launch()
+        self.assertEqual(self.app.jobs(), [])
+        with self.app.store.connect() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM job_inputs").fetchone()[0], 0
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM job_events").fetchone()[0], 0
+            )
+
+    def test_failed_process_and_startup_are_recorded_without_false_success(self):
+        for binary, expected in [
+            (shutil.which("false"), ["queued", "started", "failed"]),
+            ("/nonexistent/target-ansible", ["queued", "failed"]),
+        ]:
+            with self.subTest(binary=binary):
+                self.app.ansible_bin = binary
+                launched = self.queue_without_running()
+                self.app.run(launched["id"])
+                job = self.app.job(launched["id"])
+                self.assertEqual(job["status"], "failed")
+                self.assert_events(job, expected)
+
+    def test_restart_records_interruption_once_without_inventing_a_start(self):
+        launched = self.queue_without_running()
+        for _ in range(2):
+            restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
+            job = restarted.job(launched["id"])
+            self.assertEqual(job["status"], "failed")
+            self.assertIsNone(job["started_at"])
+            self.assert_events(job, ["queued", "interrupted"])
+
+    def test_cancel_during_preparation_does_not_record_a_false_failure(self):
+        launched = self.queue_without_running()
+
+        def cancel_then_fail(directory):
+            self.app.cancel(launched["id"])
+            raise OSError("preparation failed after cancellation")
+
+        with patch("backend.jobs.execution_environment", side_effect=cancel_then_fail):
+            self.app.run(launched["id"])
+        job = self.app.job(launched["id"])
+        self.assertEqual(job["status"], "cancelled")
+        self.assert_events(job, ["queued", "cancelled"])
+
+    def test_list_keeps_only_the_latest_100_jobs_and_their_own_events(self):
+        with self.app.store.connect() as db:
+            for index in range(101):
+                job_id = str(index)
+                created = f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00"
+                db.execute(
+                    "INSERT INTO jobs (id, status, created_at) VALUES (?, 'succeeded', ?)",
+                    (job_id, created),
+                )
+                db.execute(
+                    "INSERT INTO job_events (job_id, event, occurred_at) VALUES (?, 'succeeded', ?)",
+                    (job_id, created),
+                )
+        jobs = self.app.jobs()
+        self.assertEqual(
+            [job["id"] for job in jobs], [str(i) for i in range(100, 0, -1)]
+        )
+        for job in jobs:
+            self.assert_events(job, ["succeeded"])
+            self.assertEqual(job["events"][0]["occurred_at"], job["created_at"])
+
     def test_runner_receives_only_allowed_environment_and_private_directories(self):
         self.program(
             "import json, os\n"
@@ -90,7 +193,7 @@ class TargetServerTest(unittest.TestCase):
         launched = self.queue_without_running()
         with (
             patch.dict(os.environ, ambient),
-            patch("server.subprocess.Popen", wraps=subprocess.Popen) as started,
+            patch("backend.jobs.subprocess.Popen", wraps=subprocess.Popen) as started,
         ):
             self.app.run(launched["id"])
         passed_environment = started.call_args.kwargs["env"]
@@ -142,7 +245,7 @@ class TargetServerTest(unittest.TestCase):
                     "ANSIBLE_STDOUT_CALLBACK": "missing_callback",
                 },
             ),
-            patch("catalog.subprocess.run", side_effect=inspect_run),
+            patch("backend.catalog.subprocess.run", side_effect=inspect_run),
         ):
             catalog = JobCatalog(shutil.which("ansible-inventory"))
         self.assertEqual(catalog.group_hosts("all"), ["localhost"])
@@ -165,8 +268,10 @@ class TargetServerTest(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, destination)
         with (
-            patch("catalog.ROOT", repository),
-            patch("catalog.INVENTORY_SOURCE", repository / "inventories/local.yml"),
+            patch("backend.catalog.ROOT", repository),
+            patch(
+                "backend.catalog.INVENTORY_SOURCE", repository / "inventories/local.yml"
+            ),
         ):
             catalog = JobCatalog(shutil.which("ansible-inventory"))
         originals = catalog.execution_files("local-smoke")
@@ -204,7 +309,7 @@ class TargetServerTest(unittest.TestCase):
         for change in ["files", "target"]:
             with self.subTest(change=change):
                 launched = self.queue_without_running()
-                with self.app.connect() as db:
+                with self.app.store.connect() as db:
                     if change == "files":
                         files = self.catalog.execution_files("local-smoke")
                         files["playbook.yml"] = "altered playbook"
@@ -219,18 +324,19 @@ class TargetServerTest(unittest.TestCase):
                             "UPDATE jobs SET template = ? WHERE id = ?",
                             (json.dumps(template), launched["id"]),
                         )
-                with patch("server.subprocess.Popen") as process:
+                with patch("backend.jobs.subprocess.Popen") as process:
                     self.app.run(launched["id"])
                     process.assert_not_called()
                 job = self.app.job(launched["id"])
                 self.assertEqual(job["status"], "failed")
                 self.assertIn("integrity verification", job["output"])
+                self.assert_events(job, ["queued", "failed"])
 
     def test_missing_execution_snapshot_does_not_fall_back_to_repository(self):
         launched = self.queue_without_running()
-        with self.app.connect() as db:
+        with self.app.store.connect() as db:
             db.execute("DELETE FROM job_inputs WHERE job_id = ?", (launched["id"],))
-        with patch("server.subprocess.Popen") as process:
+        with patch("backend.jobs.subprocess.Popen") as process:
             self.app.run(launched["id"])
             process.assert_not_called()
         self.assertEqual(self.app.job(launched["id"])["status"], "failed")
@@ -314,7 +420,7 @@ class TargetServerTest(unittest.TestCase):
 
     def test_migrates_history_without_changing_legacy_results(self):
         database = Path(self.directory.name) / "legacy.sqlite3"
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db, db:
             db.execute(
                 "CREATE TABLE jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, return_code INTEGER, output TEXT NOT NULL DEFAULT '')"
             )
@@ -326,6 +432,7 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(migrated["output"], "Original output")
         self.assertEqual(migrated["template"]["inventory"]["id"], "localhost-inline")
         self.assertNotIn("revision", migrated["template"])
+        self.assertEqual(migrated["events"], [])
 
     def test_approved_playbooks_run_against_their_inventory_groups(self):
         self.app.ansible_bin = shutil.which("ansible-playbook")
@@ -380,7 +487,7 @@ class TargetServerTest(unittest.TestCase):
             "os.close(2)\n"
             "time.sleep(30)"
         )
-        with patch("server.RUN_TIMEOUT_SECONDS", 2):
+        with patch("backend.jobs.RUN_TIMEOUT_SECONDS", 2):
             _, launched = self.request("POST", "/api/jobs")
             finished = self.wait_for_job(
                 launched["id"], lambda job: job["status"] == "timed_out"
@@ -388,6 +495,7 @@ class TargetServerTest(unittest.TestCase):
         self.assertTrue(finished["output"].startswith("before timeout"))
         self.assertIn("Target stopped this run", finished["output"])
         self.assertNotEqual(finished["return_code"], 0)
+        self.assert_events(finished, ["queued", "started", "timed_out"])
 
     def test_launch_persists_real_process_result(self):
         status, launched = self.request("POST", "/api/jobs")
@@ -412,7 +520,7 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/jobs")[1], [])
 
     def test_rejects_parallel_job(self):
-        with self.app.connect() as db:
+        with self.app.store.connect() as db:
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('active', 'running', '2026-01-01')"
             )
@@ -420,7 +528,7 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(status, 409)
 
     def test_cancel_queued_job_before_start(self):
-        with self.app.connect() as db:
+        with self.app.store.connect() as db:
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('queued', 'queued', '2026-01-01')"
             )
@@ -453,6 +561,9 @@ class TargetServerTest(unittest.TestCase):
         self.assertIsNotNone(job["finished_at"])
         self.assertNotEqual(job["return_code"], 0)
         self.assertTrue(job["output"].startswith("before cancellation"))
+        self.assert_events(
+            job, ["queued", "started", "cancellation_requested", "cancelled"]
+        )
         self.app.ansible_bin = shutil.which("true")
         self.assertEqual(self.request("POST", "/api/jobs")[0], 201)
 
@@ -464,7 +575,7 @@ class TargetServerTest(unittest.TestCase):
         )
 
     def test_restart_marks_interrupted_run_failed(self):
-        with self.app.connect() as db:
+        with self.app.store.connect() as db:
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'running', '2026-01-01')"
             )
@@ -472,7 +583,7 @@ class TargetServerTest(unittest.TestCase):
         self.assertEqual(restarted.job("interrupted")["status"], "failed")
 
     def test_restart_marks_cancelling_run_failed(self):
-        with self.app.connect() as db:
+        with self.app.store.connect() as db:
             db.execute(
                 "INSERT INTO jobs (id, status, created_at) VALUES ('interrupted', 'cancelling', '2026-01-01')"
             )

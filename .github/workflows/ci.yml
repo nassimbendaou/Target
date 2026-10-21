@@ -35,8 +35,8 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Lint Python
         run: |
-          ruff check catalog.py server.py tests
-          ruff format --check catalog.py server.py tests
+          ruff check .
+          ruff format --check .
       - name: Check workflow and frontend formatting
         run: |
           actionlint
