@@ -19,7 +19,7 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from catalog import JobCatalog, LEGACY_TEMPLATE
+from catalog import JobCatalog, LEGACY_TEMPLATE, execution_environment
 
 ROOT = Path(__file__).resolve().parent
 RUN_TIMEOUT_SECONDS = 90
@@ -160,6 +160,7 @@ class TargetApp:
                     path = directory / name
                     path.write_bytes(content.encode("utf-8"))
                     path.chmod(0o600)
+                environment = execution_environment(directory)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 with self.lock, self.connect() as db:
                     db.execute(
@@ -171,15 +172,9 @@ class TargetApp:
                         ),
                     )
                 return
-            self._execute(job_id, directory)
+            self._execute(job_id, directory, environment)
 
-    def _execute(self, job_id, directory):
-        environment = os.environ.copy()
-        environment.update(
-            ANSIBLE_CONFIG=str(directory / "ansible.cfg"),
-            ANSIBLE_NOCOLOR="1",
-            PYTHONUNBUFFERED="1",
-        )
+    def _execute(self, job_id, directory, environment):
         with self.lock:
             job = self.job(job_id)
             if job["status"] != "queued":

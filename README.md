@@ -64,6 +64,12 @@ Each launch stores its captured files privately in SQLite alongside the template
 
 This covers the bundled self-contained playbooks, not external roles, includes, variable files, secrets, or the host's state. Hashes identify inputs and detect accidental inconsistency; they are not signed audit records or execution isolation. Keep the SQLite database private.
 
+### Runner environment
+
+Inventory discovery and job execution receive an allowlisted environment: the local toolchain's `PATH` and locale settings, plus Target-controlled Ansible settings. Ambient cloud tokens, SSH agent sockets, Python import overrides, and Ansible configuration/plugin overrides are not forwarded. Each process gets a private temporary home and temporary-file directory, removed with its execution workspace. User home-directory Ansible configuration and plugins are not automatically loaded. This follows [Ansible's configuration precedence](https://docs.ansible.com/projects/ansible/latest/installation_guide/intro_configuration.html#environmental-configuration), where environment variables can override configuration files.
+
+This is not a sandbox: approved playbooks still run as the API's operating-system user and can access that user's files and network. `PATH` and installed tools remain trusted; use only the pinned Nix shell and trusted bundled playbooks. No remote execution or credential injection is enabled.
+
 Both servers listen on `127.0.0.1` only. The API checks the host and browser origin, allows one job at a time across all templates, limits a run to 90 seconds, and records the result. Cancelling sends SIGKILL to the local job's process group and records it as cancelled. The UI shows no simulated hosts or jobs.
 
 This is a development slice, not a production automation service. There is no login, approval record, customer worker, container isolation, remote inventory, or secrets integration yet. Do not expose the local API through a reverse proxy or run it on a shared machine. Those boundaries are the next feature before any remote execution.

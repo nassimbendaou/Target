@@ -39,6 +39,31 @@ LEGACY_TEMPLATE = {
 }
 
 
+def execution_environment(directory):
+    """Keep ambient credentials and Ansible overrides out of child processes."""
+    directory = Path(directory)
+    runner_home = directory / "home"
+    runner_temp = directory / "tmp"
+    for path in (runner_home, runner_temp):
+        path.mkdir(mode=0o700)
+    # shortcut: PATH is the trusted local toolchain; pin worker images before remote execution.
+    return {
+        **{
+            name: os.environ[name]
+            for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
+            if name in os.environ
+        },
+        "HOME": str(runner_home),
+        "TMPDIR": str(runner_temp),
+        "ANSIBLE_HOME": str(runner_home / ".ansible"),
+        "ANSIBLE_LOCAL_TEMP": str(runner_temp / "ansible"),
+        "ANSIBLE_REMOTE_TEMP": str(runner_temp / "modules"),
+        "ANSIBLE_CONFIG": str(directory / "ansible.cfg"),
+        "ANSIBLE_NOCOLOR": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+
+
 class JobCatalog:
     def __init__(self, inventory_bin):
         if not inventory_bin:
@@ -66,7 +91,7 @@ class JobCatalog:
             result = subprocess.run(
                 [inventory_bin, "-i", str(directory / "inventory.yml"), "--list"],
                 cwd=directory,
-                env={**os.environ, "ANSIBLE_CONFIG": str(directory / "ansible.cfg")},
+                env=execution_environment(directory),
                 capture_output=True,
                 text=True,
                 timeout=15,
