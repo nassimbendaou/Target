@@ -8,12 +8,14 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -58,6 +60,10 @@ class TargetApp:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             if "template" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN template TEXT")
+            db.execute("""CREATE TABLE IF NOT EXISTS job_inputs (
+                job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+                files TEXT NOT NULL
+            )""")
             db.execute(
                 "UPDATE jobs SET template = ? WHERE template IS NULL",
                 (json.dumps(LEGACY_TEMPLATE),),
@@ -96,6 +102,7 @@ class TargetApp:
 
     def launch(self, template_id="local-smoke"):
         template = self.catalog.template(template_id)
+        files = self.catalog.execution_files(template_id)
         with self.lock:
             with self.connect() as db:
                 active = db.execute(
@@ -108,13 +115,68 @@ class TargetApp:
                     "INSERT INTO jobs (id, status, created_at, template) VALUES (?, 'queued', ?, ?)",
                     (job_id, now(), json.dumps(template)),
                 )
+                db.execute(
+                    "INSERT INTO job_inputs (job_id, files) VALUES (?, ?)",
+                    (job_id, json.dumps(files)),
+                )
             threading.Thread(target=self.run, args=(job_id,), daemon=True).start()
             return self.job(job_id)
 
     def run(self, job_id):
+        job = self.job(job_id)
+        if job["status"] != "queued":
+            return
+        with ExitStack() as resources:
+            try:
+                with self.connect() as db:
+                    row = db.execute(
+                        "SELECT files FROM job_inputs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
+                if not row:
+                    raise ValueError("No captured inputs for this run; start a new run")
+                files = json.loads(row["files"])
+                if (
+                    not isinstance(files, dict)
+                    or set(files) != {"inventory.yml", "playbook.yml", "ansible.cfg"}
+                    or not all(isinstance(content, str) for content in files.values())
+                ):
+                    raise ValueError("Invalid execution snapshot")
+                template = job["template"].copy()
+                revision = template.pop("revision")
+                if sha256(
+                    json.dumps(template, sort_keys=True).encode("utf-8")
+                ).hexdigest() != revision or any(
+                    sha256(content.encode("utf-8")).hexdigest()
+                    != template["source_hashes"][name]
+                    for name, content in files.items()
+                ):
+                    raise ValueError("Execution snapshot failed integrity verification")
+                directory = Path(
+                    resources.enter_context(
+                        tempfile.TemporaryDirectory(prefix="target-run-")
+                    )
+                )
+                for name, content in files.items():
+                    path = directory / name
+                    path.write_bytes(content.encode("utf-8"))
+                    path.chmod(0o600)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                with self.lock, self.connect() as db:
+                    db.execute(
+                        "UPDATE jobs SET status = 'failed', finished_at = ?, output = ? WHERE id = ? AND status = 'queued'",
+                        (
+                            now(),
+                            f"Could not prepare execution snapshot: {error}",
+                            job_id,
+                        ),
+                    )
+                return
+            self._execute(job_id, directory)
+
+    def _execute(self, job_id, directory):
         environment = os.environ.copy()
         environment.update(
-            ANSIBLE_CONFIG=str(ROOT / "ansible.cfg"),
+            ANSIBLE_CONFIG=str(directory / "ansible.cfg"),
             ANSIBLE_NOCOLOR="1",
             PYTHONUNBUFFERED="1",
         )
@@ -122,11 +184,20 @@ class TargetApp:
             job = self.job(job_id)
             if job["status"] != "queued":
                 return
-            command = self.catalog.command(self.ansible_bin, job["template"]["id"])
+            command = [
+                self.ansible_bin,
+                "-i",
+                str(directory / "inventory.yml"),
+                "-c",
+                "local",
+                "--limit",
+                job["template"]["target_group"],
+                str(directory / "playbook.yml"),
+            ]
             try:
                 process = subprocess.Popen(
                     command,
-                    cwd=ROOT,
+                    cwd=directory,
                     env=environment,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

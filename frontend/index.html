@@ -225,6 +225,30 @@
                     <dd id="detail-exit"></dd>
                   </div>
                 </dl>
+                <details class="input-details">
+                  <summary>Execution inputs</summary>
+                  <p id="input-legacy" class="output-note">
+                    Input snapshots were not captured for this older run.
+                  </p>
+                  <dl id="input-provenance" class="detail-list" hidden>
+                    <div>
+                      <dt>Input revision</dt>
+                      <dd id="detail-revision" class="mono"></dd>
+                    </div>
+                    <div>
+                      <dt>Playbook SHA-256</dt>
+                      <dd id="detail-playbook-hash" class="mono"></dd>
+                    </div>
+                    <div>
+                      <dt>Inventory SHA-256</dt>
+                      <dd id="detail-inventory-hash" class="mono"></dd>
+                    </div>
+                    <div>
+                      <dt>Config SHA-256</dt>
+                      <dd id="detail-config-hash" class="mono"></dd>
+                    </div>
+                  </dl>
+                </details>
                 <div id="detail-actions" class="detail-actions" hidden>
                   <button
                     id="cancel-button"
