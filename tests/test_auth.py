@@ -169,7 +169,8 @@ class AuthenticatedAPITest(unittest.TestCase):
 
     def headers(self, role):
         identifier, csrf = self.auth.create_session(
-            {"sub": role, "name": role, "roles": [role]}, time.time() + 100
+            {"sub": role, "issuer": ISSUER, "name": role, "roles": [role]},
+            time.time() + 100,
         )
         return {
             "Cookie": f"target_session={identifier}",

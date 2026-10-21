@@ -67,7 +67,7 @@ The workflow uses actions pinned to commit SHAs and a read-only repository token
 
 The run inspector's **Run timeline** shows persisted lifecycle events in recorded order: queued, execution started, cancellation requested, and the final outcome. Snapshot preparation and process startup failures are recorded even when execution never starts. On API startup, unfinished runs are marked failed with an interruption-detected event; that timestamp is when Target detected the interruption, not when the process stopped. Events are committed in the same SQLite transaction as their job-state changes. API list and detail responses include the same ordered `events` array.
 
-Completed older runs retain an empty timeline rather than reconstructed events. Rejected launch/cancel requests do not create lifecycle events. This is a local operational history, not a security audit trail: events have no authenticated actor, signing, or protection against database edits. No event write/delete API is exposed.
+Launch and cancellation events record the verified user's issuer, stable subject ID, and display name. Identity comes from the server-side session, not browser parameters or forwarded-user headers. The timeline shows the actor on these events. Automatic execution/recovery events and pre-authentication history retain a null actor; no identity is backfilled. Completed older runs retain an empty timeline rather than reconstructed events. Rejected launch/cancel requests do not create lifecycle events. This is local operational history, not a tamper-proof audit log: there is no signing or protection against database edits. No event write/delete API is exposed.
 
 ## Scope and safety
 

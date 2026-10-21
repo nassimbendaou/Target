@@ -92,12 +92,42 @@ class TargetServerTest(unittest.TestCase):
         with patch.object(self.app, "run"):
             return self.app.launch()
 
+    def test_launch_and_cancel_record_only_the_authenticated_actor(self):
+        with patch.object(self.app, "run"):
+            status, launched = self.request(
+                "POST", "/api/jobs", {"X-Forwarded-User": "forged", "X-Role": "root"}
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(
+            launched["events"][0]["actor"],
+            {"issuer": ISSUER, "sub": "test-admin", "name": "Test admin"},
+        )
+        self.session_id, self.csrf = self.auth.create_session(
+            {
+                "issuer": ISSUER,
+                "sub": "other-operator",
+                "name": "Other operator",
+                "roles": ["operator"],
+            },
+            time.time() + 100,
+        )
+        status, cancelled = self.request("POST", f"/api/jobs/{launched['id']}/cancel")
+        self.assertEqual(status, 202)
+        self.assertEqual(cancelled["events"][-1]["actor"]["sub"], "other-operator")
+        self.assertEqual(cancelled["events"][0]["actor"]["sub"], "test-admin")
+        self.assertEqual(
+            self.request("POST", f"/api/jobs/{launched['id']}/cancel")[0], 409
+        )
+        self.assertEqual(len(self.app.job(launched["id"])["events"]), 2)
+        restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
+        self.assertEqual(restarted.job(launched["id"])["events"], cancelled["events"])
+
     def assert_events(self, job, expected):
         self.assertEqual([event["event"] for event in job["events"]], expected)
         ids = [event["id"] for event in job["events"]]
         self.assertEqual(ids, sorted(set(ids)))
         for event in job["events"]:
-            self.assertEqual(set(event), {"id", "event", "occurred_at"})
+            self.assertEqual(set(event), {"id", "event", "occurred_at", "actor"})
             self.assertTrue(event["occurred_at"].endswith("+00:00"))
 
     def test_events_persist_and_match_list_and_detail_without_crossing_jobs(self):

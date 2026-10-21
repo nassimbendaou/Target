@@ -866,3 +866,8 @@ tbody tr.selected {
   margin-left: auto;
   font-size: 12px;
 }
+.event-actor {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}

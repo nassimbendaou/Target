@@ -146,6 +146,7 @@ def make_handler(app, auth):
                 )
             if not can_operate(session):
                 return self.respond(403, {"error": "Operator role required"})
+            actor = {key: session["user"][key] for key in ("issuer", "sub", "name")}
             if path == "/api/jobs":
                 template_id = "local-smoke"
                 if length:
@@ -169,7 +170,7 @@ def make_handler(app, auth):
                         )
                     template_id = parameters["template_id"]
                 try:
-                    job = app.launch(template_id)
+                    job = app.launch(template_id, actor=actor)
                 except KeyError:
                     return self.respond(404, {"error": "Unknown job template"})
                 return (
@@ -183,7 +184,7 @@ def make_handler(app, auth):
                 job_id = path.removeprefix("/api/jobs/").removesuffix("/cancel")
                 if not job_id or "/" in job_id:
                     return self.respond(400, {"error": "Unsupported request"})
-                status, job = app.cancel(job_id)
+                status, job = app.cancel(job_id, actor=actor)
                 if status == 404:
                     return self.respond(404, {"error": "Job not found"})
                 if status == 409:

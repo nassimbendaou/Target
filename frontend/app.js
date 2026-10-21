@@ -187,6 +187,12 @@ function renderDetails() {
       time.dateTime = event.occurred_at;
       time.textContent = new Date(event.occurred_at).toLocaleString();
       item.append(label, time);
+      if (event.actor) {
+        const actor = document.createElement("span");
+        actor.className = "event-actor";
+        actor.textContent = `By ${event.actor.name} · ${event.actor.sub}`;
+        item.append(actor);
+      }
       return item;
     }),
   );
