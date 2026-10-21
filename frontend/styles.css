@@ -852,3 +852,22 @@ tbody tr.selected {
     padding-right: 14px;
   }
 }
+.auth-panel {
+  max-width: 620px;
+  margin: 40px auto;
+  padding: 32px;
+}
+.auth-panel .primary-button {
+  display: inline-block;
+  margin: 18px 0;
+  text-decoration: none;
+}
+.session-user {
+  margin-left: auto;
+  font-size: 12px;
+}
+.event-actor {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}

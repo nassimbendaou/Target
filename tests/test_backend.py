@@ -14,6 +14,7 @@ class ServerStartupTest(unittest.TestCase):
                 "backend.server.shutil.which", return_value="/trusted/ansible-playbook"
             ),
             patch("backend.server.TargetApp") as application,
+            patch("backend.server.AuthManager"),
             patch("backend.server.ThreadingHTTPServer") as http_server,
             patch("builtins.print"),
         ):
@@ -46,6 +47,24 @@ class ServerStartupTest(unittest.TestCase):
 
 
 class JobStoreTest(unittest.TestCase):
+    def test_event_actor_migration_does_not_invent_identity_for_older_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "history.sqlite3"
+            store = JobStore(database)
+            with store.connect() as db:
+                db.execute("ALTER TABLE job_events DROP COLUMN actor")
+                db.execute(
+                    "INSERT INTO jobs (id, status, created_at) VALUES ('old', 'succeeded', '2026-01-01')"
+                )
+                db.execute(
+                    "INSERT INTO job_events (job_id, event, occurred_at) VALUES ('old', 'succeeded', '2026-01-01')"
+                )
+            migrated = JobStore(database)
+            event = migrated.job("old")["events"][0]
+            self.assertIsNone(event["actor"])
+            self.assertEqual(event["occurred_at"], "2026-01-01")
+            self.assertEqual(migrated.jobs()[0]["events"], [event])
+
     def test_store_works_without_loading_ansible_or_starting_threads(self):
         with (
             tempfile.TemporaryDirectory() as directory,

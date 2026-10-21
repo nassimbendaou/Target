@@ -21,11 +21,17 @@ def decode_job(row):
     return job
 
 
-def record_event(db, job_id, event):
+def record_event(db, job_id, event, actor=None):
     db.execute(
-        "INSERT INTO job_events (job_id, event, occurred_at) VALUES (?, ?, ?)",
-        (job_id, event, now()),
+        "INSERT INTO job_events (job_id, event, occurred_at, actor) VALUES (?, ?, ?, ?)",
+        (job_id, event, now(), json.dumps(actor) if actor else None),
     )
+
+
+def decode_event(row):
+    event = dict(row)
+    event["actor"] = json.loads(event["actor"]) if event["actor"] else None
+    return event
 
 
 class JobStore:
@@ -56,6 +62,11 @@ class JobStore:
                 event TEXT NOT NULL,
                 occurred_at TEXT NOT NULL
             )""")
+            event_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(job_events)")
+            }
+            if "actor" not in event_columns:
+                db.execute("ALTER TABLE job_events ADD COLUMN actor TEXT")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS job_events_by_job ON job_events(job_id, id)"
             )
@@ -97,7 +108,7 @@ class JobStore:
                 SELECT id FROM jobs ORDER BY created_at DESC LIMIT 100
                 ) ORDER BY id"""
             ):
-                event = dict(row)
+                event = decode_event(row)
                 jobs[event.pop("job_id")]["events"].append(event)
             return list(jobs.values())
 
@@ -109,9 +120,9 @@ class JobStore:
                 return None
             job = decode_job(row)
             job["events"] = [
-                dict(event)
+                decode_event(event)
                 for event in db.execute(
-                    "SELECT id, event, occurred_at FROM job_events WHERE job_id = ? ORDER BY id",
+                    "SELECT id, event, occurred_at, actor FROM job_events WHERE job_id = ? ORDER BY id",
                     (job_id,),
                 )
             ]

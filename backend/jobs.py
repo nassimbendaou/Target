@@ -37,7 +37,7 @@ class TargetApp:
     def job(self, job_id):
         return self.store.job(job_id)
 
-    def launch(self, template_id="local-smoke"):
+    def launch(self, template_id="local-smoke", actor=None):
         template = self.catalog.template(template_id)
         files = self.catalog.execution_files(template_id)
         with self.lock:
@@ -56,7 +56,7 @@ class TargetApp:
                     "INSERT INTO job_inputs (job_id, files) VALUES (?, ?)",
                     (job_id, json.dumps(files)),
                 )
-                record_event(db, job_id, "queued")
+                record_event(db, job_id, "queued", actor)
             threading.Thread(target=self.run, args=(job_id,), daemon=True).start()
             return self.job(job_id)
 
@@ -202,7 +202,7 @@ class TargetApp:
                 )
                 record_event(db, job_id, status)
 
-    def cancel(self, job_id):
+    def cancel(self, job_id, actor=None):
         with self.lock:
             job = self.job(job_id)
             if not job:
@@ -213,7 +213,7 @@ class TargetApp:
                         "UPDATE jobs SET status = 'cancelled', finished_at = ?, output = ? WHERE id = ?",
                         (now(), "Target cancelled this run before it started.", job_id),
                     )
-                    record_event(db, job_id, "cancelled")
+                    record_event(db, job_id, "cancelled", actor)
             elif job["status"] == "running":
                 process = self.processes[job_id]
                 if process.poll() is not None:
@@ -222,7 +222,7 @@ class TargetApp:
                     db.execute(
                         "UPDATE jobs SET status = 'cancelling' WHERE id = ?", (job_id,)
                     )
-                    record_event(db, job_id, "cancellation_requested")
+                    record_event(db, job_id, "cancellation_requested", actor)
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:

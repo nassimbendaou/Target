@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .api import make_handler
+from .auth import AuthManager
 from .jobs import TargetApp
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,7 +19,7 @@ def main():
         )
     server = ThreadingHTTPServer(("127.0.0.1", 8000), BaseHTTPRequestHandler)
     app = TargetApp(ROOT / ".data" / "target.sqlite3", ansible_bin)
-    server.RequestHandlerClass = make_handler(app)
+    server.RequestHandlerClass = make_handler(app, AuthManager(app.store))
     print("Target API is ready at http://127.0.0.1:8000", flush=True)
     try:
         server.serve_forever()

@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.api import make_handler
+from backend.auth import AuthManager, ISSUER, SESSION_COOKIE
 from backend.jobs import TargetApp
 from backend.catalog import JobCatalog, TEMPLATES, ROOT
 
@@ -29,7 +30,19 @@ class TargetServerTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.database = Path(self.directory.name) / "backend.jobs.sqlite3"
         self.app = TargetApp(self.database, shutil.which("true"), self.catalog)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.app))
+        self.auth = AuthManager(self.app.store)
+        self.session_id, self.csrf = self.auth.create_session(
+            {
+                "sub": "test-admin",
+                "issuer": ISSUER,
+                "name": "Test admin",
+                "roles": ["admin"],
+            },
+            time.time() + 300,
+        )
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(self.app, self.auth)
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -46,8 +59,14 @@ class TargetServerTest(unittest.TestCase):
 
     def request(self, method, path, headers=None, body=b""):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        supplied = {
+            "Cookie": f"{SESSION_COOKIE}={self.session_id}",
+            "X-CSRF-Token": self.csrf,
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            **(headers or {}),
+        }
         connection.request(
-            method, path, body=body if method == "POST" else None, headers=headers or {}
+            method, path, body=body if method == "POST" else None, headers=supplied
         )
         response = connection.getresponse()
         result = response.status, json.loads(response.read())
@@ -73,12 +92,42 @@ class TargetServerTest(unittest.TestCase):
         with patch.object(self.app, "run"):
             return self.app.launch()
 
+    def test_launch_and_cancel_record_only_the_authenticated_actor(self):
+        with patch.object(self.app, "run"):
+            status, launched = self.request(
+                "POST", "/api/jobs", {"X-Forwarded-User": "forged", "X-Role": "root"}
+            )
+        self.assertEqual(status, 201)
+        self.assertEqual(
+            launched["events"][0]["actor"],
+            {"issuer": ISSUER, "sub": "test-admin", "name": "Test admin"},
+        )
+        self.session_id, self.csrf = self.auth.create_session(
+            {
+                "issuer": ISSUER,
+                "sub": "other-operator",
+                "name": "Other operator",
+                "roles": ["operator"],
+            },
+            time.time() + 100,
+        )
+        status, cancelled = self.request("POST", f"/api/jobs/{launched['id']}/cancel")
+        self.assertEqual(status, 202)
+        self.assertEqual(cancelled["events"][-1]["actor"]["sub"], "other-operator")
+        self.assertEqual(cancelled["events"][0]["actor"]["sub"], "test-admin")
+        self.assertEqual(
+            self.request("POST", f"/api/jobs/{launched['id']}/cancel")[0], 409
+        )
+        self.assertEqual(len(self.app.job(launched["id"])["events"]), 2)
+        restarted = TargetApp(self.database, shutil.which("true"), self.catalog)
+        self.assertEqual(restarted.job(launched["id"])["events"], cancelled["events"])
+
     def assert_events(self, job, expected):
         self.assertEqual([event["event"] for event in job["events"]], expected)
         ids = [event["id"] for event in job["events"]]
         self.assertEqual(ids, sorted(set(ids)))
         for event in job["events"]:
-            self.assertEqual(set(event), {"id", "event", "occurred_at"})
+            self.assertEqual(set(event), {"id", "event", "occurred_at", "actor"})
             self.assertTrue(event["occurred_at"].endswith("+00:00"))
 
     def test_events_persist_and_match_list_and_detail_without_crossing_jobs(self):
