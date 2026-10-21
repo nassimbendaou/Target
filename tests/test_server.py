@@ -1,7 +1,9 @@
 import http.client
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -68,6 +70,88 @@ class TargetServerTest(unittest.TestCase):
     def queue_without_running(self):
         with patch.object(self.app, "run"):
             return self.app.launch()
+
+    def test_runner_receives_only_allowed_environment_and_private_directories(self):
+        self.program(
+            "import json, os\n"
+            "from pathlib import Path\n"
+            "print(json.dumps({'env': dict(os.environ), 'modes': {name: Path(os.environ[name]).stat().st_mode & 0o777 for name in ['HOME', 'TMPDIR']}}))"
+        )
+        ambient = {
+            "AWS_SECRET_ACCESS_KEY": "not-for-the-runner",
+            "GITHUB_TOKEN": "not-for-the-runner",
+            "SSH_AUTH_SOCK": "/ambient/agent",
+            "PYTHONPATH": "/ambient/python",
+            "ANSIBLE_CONFIG": "/ambient/ansible.cfg",
+            "ANSIBLE_CALLBACK_PLUGINS": "/ambient/plugins",
+            "ANSIBLE_HOME": "/ambient/ansible",
+            "ANSIBLE_REMOTE_TEMP": "/ambient/modules",
+        }
+        launched = self.queue_without_running()
+        with (
+            patch.dict(os.environ, ambient),
+            patch("server.subprocess.Popen", wraps=subprocess.Popen) as started,
+        ):
+            self.app.run(launched["id"])
+        passed_environment = started.call_args.kwargs["env"]
+        finished = self.app.job(launched["id"])
+        self.assertEqual(finished["status"], "succeeded", finished["output"])
+        captured = json.loads(finished["output"])
+        environment = captured["env"]
+        for name in ambient:
+            self.assertNotEqual(environment.get(name), ambient[name], name)
+        self.assertEqual(
+            set(passed_environment),
+            {
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "ANSIBLE_HOME",
+                "ANSIBLE_LOCAL_TEMP",
+                "ANSIBLE_REMOTE_TEMP",
+                "ANSIBLE_CONFIG",
+                "ANSIBLE_NOCOLOR",
+                "PYTHONUNBUFFERED",
+            }
+            | (set(os.environ) & {"LANG", "LC_ALL", "LC_CTYPE"}),
+        )
+        self.assertEqual(captured["modes"], {"HOME": 0o700, "TMPDIR": 0o700})
+        for name, value in passed_environment.items():
+            self.assertEqual(environment[name], value)
+        self.assertEqual(environment["PATH"], os.environ["PATH"])
+        for name in ("HOME", "TMPDIR"):
+            self.assertFalse(Path(environment[name]).exists())
+
+    def test_inventory_uses_the_same_clean_environment_and_cleans_up(self):
+        captured = {}
+        original_run = subprocess.run
+
+        def inspect_run(*args, **kwargs):
+            captured.update(kwargs["env"])
+            self.assertTrue(Path(captured["HOME"]).is_dir())
+            self.assertTrue(Path(captured["TMPDIR"]).is_dir())
+            return original_run(*args, **kwargs)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AWS_SECRET_ACCESS_KEY": "not-for-inventory",
+                    "ANSIBLE_CONFIG": "/missing/config",
+                    "ANSIBLE_INVENTORY": "/missing/inventory",
+                    "ANSIBLE_STDOUT_CALLBACK": "missing_callback",
+                },
+            ),
+            patch("catalog.subprocess.run", side_effect=inspect_run),
+        ):
+            catalog = JobCatalog(shutil.which("ansible-inventory"))
+        self.assertEqual(catalog.group_hosts("all"), ["localhost"])
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", captured)
+        self.assertNotIn("ANSIBLE_INVENTORY", captured)
+        self.assertNotIn("ANSIBLE_STDOUT_CALLBACK", captured)
+        self.assertNotEqual(captured["ANSIBLE_CONFIG"], "/missing/config")
+        self.assertFalse(Path(captured["HOME"]).exists())
+        self.assertFalse(Path(captured["TMPDIR"]).exists())
 
     def test_run_uses_frozen_files_after_repository_and_catalog_change(self):
         repository = Path(self.directory.name) / "repository"
