@@ -136,6 +136,30 @@ function renderDetails() {
   elements.detailContent.hidden = !job;
   if (!job) return;
 
+  const eventLabels = {
+    queued: "Run queued",
+    started: "Execution started",
+    cancellation_requested: "Cancellation requested",
+    cancelled: "Run cancelled",
+    succeeded: "Run succeeded",
+    failed: "Run failed",
+    timed_out: "Execution timed out",
+    interrupted: "Interrupted run detected at API startup",
+  };
+  const events = job.events || [];
+  document.querySelector("#timeline-empty").hidden = events.length > 0;
+  document.querySelector("#run-timeline").replaceChildren(
+    ...events.map((event) => {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = eventLabels[event.event] || event.event;
+      const time = document.createElement("time");
+      time.dateTime = event.occurred_at;
+      time.textContent = new Date(event.occurred_at).toLocaleString();
+      item.append(label, time);
+      return item;
+    }),
+  );
   document.querySelector("#detail-name").textContent = job.template.name;
   const hashes = job.template.source_hashes;
   document.querySelector("#input-legacy").hidden = Boolean(hashes);

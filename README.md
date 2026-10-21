@@ -37,6 +37,12 @@ nix develop --command actionlint
 
 The workflow uses actions pinned to commit SHAs and a read-only repository token. Dependency installation uses `npm ci --ignore-scripts`; the frontend build uses the packages pinned in `package-lock.json`.
 
+## Run timeline
+
+The run inspector's **Run timeline** shows persisted lifecycle events in recorded order: queued, execution started, cancellation requested, and the final outcome. Snapshot preparation and process startup failures are recorded even when execution never starts. On API startup, unfinished runs are marked failed with an interruption-detected event; that timestamp is when Target detected the interruption, not when the process stopped. Events are committed in the same SQLite transaction as their job-state changes. API list and detail responses include the same ordered `events` array.
+
+Completed older runs retain an empty timeline rather than reconstructed events. Rejected launch/cancel requests do not create lifecycle events. This is a local operational history, not a security audit trail: events have no authenticated actor, signing, or protection against database edits. No event write/delete API is exposed.
+
 ## Scope and safety
 
 ### Templates and inventory

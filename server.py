@@ -38,6 +38,13 @@ def decode_job(row):
     return job
 
 
+def record_event(db, job_id, event):
+    db.execute(
+        "INSERT INTO job_events (job_id, event, occurred_at) VALUES (?, ?, ?)",
+        (job_id, event, now()),
+    )
+
+
 class TargetApp:
     def __init__(self, database, ansible_bin, catalog=None):
         self.catalog = catalog or JobCatalog(shutil.which("ansible-inventory"))
@@ -64,16 +71,27 @@ class TargetApp:
                 job_id TEXT PRIMARY KEY REFERENCES jobs(id),
                 files TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS job_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES jobs(id),
+                event TEXT NOT NULL,
+                occurred_at TEXT NOT NULL
+            )""")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS job_events_by_job ON job_events(job_id, id)"
+            )
             db.execute(
                 "UPDATE jobs SET template = ? WHERE template IS NULL",
                 (json.dumps(LEGACY_TEMPLATE),),
             )
-            db.execute(
+            interrupted = db.execute(
                 """UPDATE jobs SET status = 'failed', finished_at = ?,
                 output = output || '\nTarget stopped before this run finished.'
-                WHERE status IN ('queued', 'running', 'cancelling')""",
+                WHERE status IN ('queued', 'running', 'cancelling') RETURNING id""",
                 (now(),),
-            )
+            ).fetchall()
+            for row in interrupted:
+                record_event(db, row["id"], "interrupted")
         self.database.chmod(0o600)
 
     @contextmanager
@@ -88,17 +106,37 @@ class TargetApp:
 
     def jobs(self):
         with self.connect() as db:
-            return [
-                decode_job(row)
+            db.execute("BEGIN")
+            jobs = {
+                row["id"]: {**decode_job(row), "events": []}
                 for row in db.execute(
                     "SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100"
                 )
-            ]
+            }
+            for row in db.execute(
+                """SELECT * FROM job_events WHERE job_id IN (
+                SELECT id FROM jobs ORDER BY created_at DESC LIMIT 100
+                ) ORDER BY id"""
+            ):
+                event = dict(row)
+                jobs[event.pop("job_id")]["events"].append(event)
+            return list(jobs.values())
 
     def job(self, job_id):
         with self.connect() as db:
+            db.execute("BEGIN")
             row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            return decode_job(row) if row else None
+            if not row:
+                return None
+            job = decode_job(row)
+            job["events"] = [
+                dict(event)
+                for event in db.execute(
+                    "SELECT id, event, occurred_at FROM job_events WHERE job_id = ? ORDER BY id",
+                    (job_id,),
+                )
+            ]
+            return job
 
     def launch(self, template_id="local-smoke"):
         template = self.catalog.template(template_id)
@@ -119,6 +157,7 @@ class TargetApp:
                     "INSERT INTO job_inputs (job_id, files) VALUES (?, ?)",
                     (job_id, json.dumps(files)),
                 )
+                record_event(db, job_id, "queued")
             threading.Thread(target=self.run, args=(job_id,), daemon=True).start()
             return self.job(job_id)
 
@@ -163,7 +202,7 @@ class TargetApp:
                 environment = execution_environment(directory)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 with self.lock, self.connect() as db:
-                    db.execute(
+                    changed = db.execute(
                         "UPDATE jobs SET status = 'failed', finished_at = ?, output = ? WHERE id = ? AND status = 'queued'",
                         (
                             now(),
@@ -171,6 +210,8 @@ class TargetApp:
                             job_id,
                         ),
                     )
+                    if changed.rowcount:
+                        record_event(db, job_id, "failed")
                 return
             self._execute(job_id, directory, environment)
 
@@ -204,6 +245,7 @@ class TargetApp:
                         "UPDATE jobs SET status = 'failed', finished_at = ?, output = ? WHERE id = ?",
                         (now(), f"Could not start Ansible: {error}", job_id),
                     )
+                    record_event(db, job_id, "failed")
                 return
             self.processes[job_id] = process
             with self.connect() as db:
@@ -211,6 +253,7 @@ class TargetApp:
                     "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
                     (now(), job_id),
                 )
+                record_event(db, job_id, "started")
 
         output = ""
         persisted_output = ""
@@ -258,6 +301,7 @@ class TargetApp:
                     WHERE id = ?""",
                     (status, now(), process.returncode, output[-OUTPUT_LIMIT:], job_id),
                 )
+                record_event(db, job_id, status)
 
     def cancel(self, job_id):
         with self.lock:
@@ -270,6 +314,7 @@ class TargetApp:
                         "UPDATE jobs SET status = 'cancelled', finished_at = ?, output = ? WHERE id = ?",
                         (now(), "Target cancelled this run before it started.", job_id),
                     )
+                    record_event(db, job_id, "cancelled")
             elif job["status"] == "running":
                 process = self.processes[job_id]
                 if process.poll() is not None:
@@ -278,6 +323,7 @@ class TargetApp:
                     db.execute(
                         "UPDATE jobs SET status = 'cancelling' WHERE id = ?", (job_id,)
                     )
+                    record_event(db, job_id, "cancellation_requested")
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
